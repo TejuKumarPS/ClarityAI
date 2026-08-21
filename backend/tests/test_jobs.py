@@ -398,3 +398,234 @@ async def test_create_job_client_cannot_override_user_id(client, db):
     job = db.query(Job).filter(Job.id == job_id).first()
     assert job.user_id == legit_user.id
     assert job.user_id != victim_user.id
+
+
+# ==========================================
+# Milestone 6: Job Retrieval & Status Tests
+# ==========================================
+
+@pytest.mark.anyio
+async def test_get_job_unauthenticated(client, db):
+    user = User(email="unauth_get@example.com", password_hash="hash")
+    db.add(user)
+    db.commit()
+    job = Job(user_id=user.id, input_type="text_paste", raw_transcript="Sample transcript text.", status="pending")
+    db.add(job)
+    db.commit()
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs/{job.id}")
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_get_job_invalid_token(client, db):
+    user = User(email="invalid_token_get@example.com", password_hash="hash")
+    db.add(user)
+    db.commit()
+    job = Job(user_id=user.id, input_type="text_paste", raw_transcript="Sample transcript text.", status="pending")
+    db.add(job)
+    db.commit()
+
+    headers = {"Authorization": "Bearer invalid.jwt.token"}
+    response = await client.get(f"{settings.API_V1_STR}/jobs/{job.id}", headers=headers)
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_get_job_expired_token(client, db):
+    from datetime import timedelta
+    from app.core.security import create_access_token
+
+    user = User(email="expired_token_get@example.com", password_hash="hash")
+    db.add(user)
+    db.commit()
+    job = Job(user_id=user.id, input_type="text_paste", raw_transcript="Sample transcript text.", status="pending")
+    db.add(job)
+    db.commit()
+
+    expired_token = create_access_token(
+        subject=str(user.id),
+        expires_delta=timedelta(minutes=-10),
+    )
+    headers = {"Authorization": f"Bearer {expired_token}"}
+    response = await client.get(f"{settings.API_V1_STR}/jobs/{job.id}", headers=headers)
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_get_job_invalid_uuid_format(client):
+    token = await register_and_get_token(client, email="invalid_uuid_get@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs/not-a-valid-uuid", headers=headers)
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_get_job_nonexistent_uuid(client):
+    token = await register_and_get_token(client, email="nonexistent_uuid_get@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    fake_id = str(uuid.uuid4())
+    response = await client.get(f"{settings.API_V1_STR}/jobs/{fake_id}", headers=headers)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Job not found"
+
+
+@pytest.mark.anyio
+async def test_get_job_ownership_isolation(client, db):
+    token_a = await register_and_get_token(client, email="retrieval_user_a@example.com")
+    token_b = await register_and_get_token(client, email="retrieval_user_b@example.com")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    # User A creates a job
+    res_create = await client.post(
+        f"{settings.API_V1_STR}/jobs",
+        json={"input_type": "text_paste", "content": "Private confidential strategy transcript for User A."},
+        headers=headers_a,
+    )
+    assert res_create.status_code == 201
+    job_id = res_create.json()["id"]
+
+    # User A retrieves own job -> 200
+    res_a = await client.get(f"{settings.API_V1_STR}/jobs/{job_id}", headers=headers_a)
+    assert res_a.status_code == 200
+    assert res_a.json()["id"] == job_id
+    assert res_a.json()["status"] == "pending"
+
+    # User B attempts to retrieve User A's job -> 404 Not Found (prevents enumeration)
+    res_b = await client.get(f"{settings.API_V1_STR}/jobs/{job_id}", headers=headers_b)
+    assert res_b.status_code == 404
+    assert res_b.json()["detail"] == "Job not found"
+
+
+@pytest.mark.anyio
+async def test_get_job_all_lifecycle_states(client, db):
+    from datetime import datetime, timezone
+
+    token = await register_and_get_token(client, email="states_user@example.com")
+    user = db.query(User).filter(User.email == "states_user@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 1. Pending state
+    job_pending = Job(user_id=user.id, input_type="text_paste", raw_transcript="Transcript pending.", status="pending")
+    db.add(job_pending)
+    db.commit()
+    res_pending = await client.get(f"{settings.API_V1_STR}/jobs/{job_pending.id}", headers=headers)
+    assert res_pending.status_code == 200
+    data_pending = res_pending.json()
+    assert data_pending["status"] == "pending"
+    assert data_pending["result"] is None
+    assert data_pending["completed_at"] is None
+    assert data_pending["retry_count"] == 0
+
+    # 2. Processing state
+    job_processing = Job(user_id=user.id, input_type="txt_file", raw_transcript="Transcript processing.", status="processing", retry_count=1)
+    db.add(job_processing)
+    db.commit()
+    res_processing = await client.get(f"{settings.API_V1_STR}/jobs/{job_processing.id}", headers=headers)
+    assert res_processing.status_code == 200
+    data_proc = res_processing.json()
+    assert data_proc["status"] == "processing"
+    assert data_proc["result"] is None
+    assert data_proc["completed_at"] is None
+    assert data_proc["retry_count"] == 1
+
+    # 3. Complete state
+    now_utc = datetime.now(timezone.utc)
+    job_complete = Job(
+        user_id=user.id,
+        input_type="pdf_file",
+        raw_transcript="Transcript completed.",
+        status="complete",
+        result={"processor": "milestone_5", "processed": True, "job_id": "test_id"},
+        completed_at=now_utc,
+        retry_count=0,
+    )
+    db.add(job_complete)
+    db.commit()
+    res_complete = await client.get(f"{settings.API_V1_STR}/jobs/{job_complete.id}", headers=headers)
+    assert res_complete.status_code == 200
+    data_comp = res_complete.json()
+    assert data_comp["status"] == "complete"
+    assert data_comp["result"] == {"processor": "milestone_5", "processed": True, "job_id": "test_id"}
+    assert data_comp["completed_at"] is not None
+
+    # 4. Failed state
+    job_failed = Job(
+        user_id=user.id,
+        input_type="text_paste",
+        raw_transcript="Transcript failed.",
+        status="failed",
+        result={"error": "Processing failed after maximum retries exceeded"},
+        retry_count=3,
+    )
+    db.add(job_failed)
+    db.commit()
+    res_failed = await client.get(f"{settings.API_V1_STR}/jobs/{job_failed.id}", headers=headers)
+    assert res_failed.status_code == 200
+    data_fail = res_failed.json()
+    assert data_fail["status"] == "failed"
+    assert data_fail["result"] == {"error": "Processing failed after maximum retries exceeded"}
+    assert data_fail["retry_count"] == 3
+
+
+@pytest.mark.anyio
+async def test_get_job_privacy_response_schema(client, db):
+    token = await register_and_get_token(client, email="privacy_user@example.com")
+    user = db.query(User).filter(User.email == "privacy_user@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    job = Job(
+        user_id=user.id,
+        input_type="text_paste",
+        raw_transcript="SUPER_SECRET_SENSITIVE_TRANSCRIPT_CONTENT_NEVER_LEAK",
+        status="pending",
+    )
+    db.add(job)
+    db.commit()
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs/{job.id}", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+
+    # Exact expected public fields
+    allowed_fields = {"id", "input_type", "status", "result", "retry_count", "created_at", "completed_at"}
+    assert set(data.keys()) == allowed_fields
+
+    # Verify sensitive data is absent
+    assert "raw_transcript" not in data
+    assert "password_hash" not in data
+    assert "SUPER_SECRET" not in str(data)
+
+
+@pytest.mark.anyio
+async def test_get_job_redis_independence(client, db, monkeypatch):
+    import redis
+
+    token = await register_and_get_token(client, email="redis_indep_user@example.com")
+    user = db.query(User).filter(User.email == "redis_indep_user@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    job = Job(
+        user_id=user.id,
+        input_type="text_paste",
+        raw_transcript="Testing direct PostgreSQL read without Redis.",
+        status="complete",
+        result={"processor": "milestone_5", "processed": True, "job_id": "test_indep"},
+    )
+    db.add(job)
+    db.commit()
+
+    # Mock Redis connection to raise error if accessed
+    def fail_redis(*args, **kwargs):
+        raise redis.ConnectionError("Redis is completely unavailable")
+
+    monkeypatch.setattr("redis.from_url", fail_redis)
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs/{job.id}", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["status"] == "complete"
+    assert response.json()["result"]["processed"] is True
+
