@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     MAX_INPUT_FILE_SIZE_BYTES: int = 10 * 1024 * 1024
     MIN_TRANSCRIPT_LENGTH: int = 10
 
+    REDIS_URL: str = "redis://localhost:6379/0"
+    CELERY_TASK_MAX_RETRIES: int = 3
+    CELERY_TASK_RETRY_BACKOFF: int = 1
+
+
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

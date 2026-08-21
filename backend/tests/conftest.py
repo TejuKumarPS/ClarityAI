@@ -23,18 +23,25 @@ def setup_test_database():
     Base.metadata.drop_all(bind=test_engine)
 
 
+from app.worker import tasks as worker_tasks
+from app.core.database import SessionLocal as DevSessionLocal
+
+@pytest.fixture(autouse=True)
+def configure_worker_test_db():
+    worker_tasks.SessionLocal = TestingSessionLocal
+    yield
+    worker_tasks.SessionLocal = DevSessionLocal
+
+
+
 @pytest.fixture
 def db():
-    connection = test_engine.connect()
-    transaction = connection.begin()
-    session = TestingSessionLocal(bind=connection)
-
+    session = TestingSessionLocal()
     yield session
-
     session.close()
-    if transaction.is_active:
-        transaction.rollback()
-    connection.close()
+    with test_engine.begin() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(table.delete())
 
 
 @pytest.fixture
@@ -55,4 +62,5 @@ async def client(db):
     async with AsyncClient(transport=transport, base_url="http://testserver") as test_client:
         yield test_client
     app.dependency_overrides.clear()
+
 

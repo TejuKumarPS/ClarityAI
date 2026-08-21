@@ -1,3 +1,4 @@
+import logging
 from typing import Optional, Any
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
@@ -17,8 +18,11 @@ from app.input_handlers.exceptions import (
 from app.models.user import User
 from app.models.job import Job
 from app.schemas.job import JobResponse
+from app.worker.tasks import process_job
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
+
 
 
 @router.post(
@@ -164,4 +168,14 @@ async def create_job(
             detail="Failed to persist job record",
         )
 
+    try:
+        process_job.delay(str(job.id))
+    except Exception as exc:
+        logger.error(f"Failed to enqueue task for job {job.id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Job created in database, but failed to enqueue for asynchronous processing",
+        )
+
     return job
+
