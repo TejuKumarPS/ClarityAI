@@ -10,6 +10,7 @@ from app.models.job import Job
 from app.models.user import User
 from app.llm.fake_provider import FakeLLMProvider
 from app.llm.exceptions import LLMInputTooLargeError
+from app.chunking.chunker import CharacterChunker
 from app.processing import (
     ProcessingStage,
     ProcessingContext,
@@ -44,7 +45,8 @@ def test_celery_broker_connection():
 
 def test_process_job_successful_lifecycle(db, monkeypatch):
     fake_provider = FakeLLMProvider()
-    test_pipeline = create_default_pipeline(llm_provider=fake_provider)
+    custom_chunker = CharacterChunker(chunk_size=15, chunk_overlap=3)
+    test_pipeline = create_default_pipeline(llm_provider=fake_provider, chunker=custom_chunker)
     monkeypatch.setattr(tasks_module, "_pipeline_override", test_pipeline)
 
     user = User(
@@ -58,7 +60,7 @@ def test_process_job_successful_lifecycle(db, monkeypatch):
     job = Job(
         user_id=user.id,
         input_type="text_paste",
-        raw_transcript="Sprint retrospective discussion notes.",
+        raw_transcript="Sprint retrospective discussion notes and actions.",
         status="pending",
     )
     db.add(job)
@@ -73,12 +75,21 @@ def test_process_job_successful_lifecycle(db, monkeypatch):
     updated_job = db.query(Job).filter(Job.id == job.id).first()
     assert updated_job.status == "complete"
     assert updated_job.result["processor"] == "clarityai-pipeline"
-    assert updated_job.result["version"] == "0.3.0"
+    assert updated_job.result["version"] == "0.4.0"
     assert updated_job.result["job_id"] == job_id_str
-    assert updated_job.result["metadata"]["word_count"] == 4
+    assert updated_job.result["metadata"]["word_count"] == 6
+
+    # Chunking metadata verified
+    assert updated_job.result["chunking_metadata"] is not None
+    assert updated_job.result["chunking_metadata"]["chunk_count"] > 1
+    assert updated_job.result["chunking_metadata"]["chunk_size_chars"] == 15
+    assert updated_job.result["chunking_metadata"]["chunk_overlap_chars"] == 3
+
+    # AI analysis & single LLM call invariance (N chunks -> exactly 1 LLM call)
     assert updated_job.result["ai_analysis"] is not None
     assert updated_job.result["ai_analysis"]["sentiment"] == "positive"
     assert len(updated_job.result["ai_analysis"]["action_items"]) == 2
+    assert fake_provider.call_count == 1
 
     # Observability columns verification
     assert updated_job.processing_started_at is not None

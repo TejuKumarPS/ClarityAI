@@ -1,5 +1,6 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from app.llm.models import AIAnalysis, LLMUsage
+from app.chunking.models import DocumentChunk, ChunkingMetadata
 
 
 class TranscriptMetadata(BaseModel):
@@ -12,6 +13,8 @@ class ProcessingContext(BaseModel):
     job_id: str
     transcript: str
     metadata: TranscriptMetadata | None = None
+    chunks: list[DocumentChunk] = Field(default_factory=list)
+    chunking_metadata: ChunkingMetadata | None = None
     ai_analysis: AIAnalysis | None = None
     llm_usage: LLMUsage | None = None
     llm_provider: str | None = None
@@ -20,9 +23,10 @@ class ProcessingContext(BaseModel):
 
 class ProcessingResult(BaseModel):
     processor: str = "clarityai-pipeline"
-    version: str = "0.3.0"
+    version: str = "0.4.0"
     job_id: str
     metadata: TranscriptMetadata
+    chunking_metadata: ChunkingMetadata | None = None
     ai_analysis: AIAnalysis | None = None
     llm_usage: LLMUsage | None = None
     llm_provider: str | None = None

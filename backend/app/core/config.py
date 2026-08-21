@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-4o-mini"
     MAX_LLM_INPUT_CHARACTERS: int = 100_000
 
+    CHUNK_SIZE_CHARS: int = 4000
+    CHUNK_OVERLAP_CHARS: int = 400
+
+
 
 
 
@@ -57,7 +61,15 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "In production, JWT_SECRET_KEY must be an explicitly configured secret of at least 32 characters"
                 )
+        if self.CHUNK_SIZE_CHARS <= 0:
+            raise ValueError("CHUNK_SIZE_CHARS must be greater than 0")
+        if self.CHUNK_OVERLAP_CHARS < 0:
+            raise ValueError("CHUNK_OVERLAP_CHARS must be greater than or equal to 0")
+        if self.CHUNK_OVERLAP_CHARS >= self.CHUNK_SIZE_CHARS:
+            raise ValueError("CHUNK_OVERLAP_CHARS must be less than CHUNK_SIZE_CHARS")
+
         return self
+
 
     model_config = SettingsConfigDict(
         env_file=".env",
