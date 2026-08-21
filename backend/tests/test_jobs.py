@@ -539,7 +539,12 @@ async def test_get_job_all_lifecycle_states(client, db):
         input_type="pdf_file",
         raw_transcript="Transcript completed.",
         status="complete",
-        result={"processor": "milestone_5", "processed": True, "job_id": "test_id"},
+        result={
+            "processor": "clarityai-pipeline",
+            "version": "0.1.0",
+            "job_id": "test_id",
+            "metadata": {"character_count": 21, "word_count": 2, "line_count": 1},
+        },
         completed_at=now_utc,
         retry_count=0,
     )
@@ -549,7 +554,9 @@ async def test_get_job_all_lifecycle_states(client, db):
     assert res_complete.status_code == 200
     data_comp = res_complete.json()
     assert data_comp["status"] == "complete"
-    assert data_comp["result"] == {"processor": "milestone_5", "processed": True, "job_id": "test_id"}
+    assert data_comp["result"]["processor"] == "clarityai-pipeline"
+    assert data_comp["result"]["version"] == "0.1.0"
+    assert data_comp["result"]["metadata"]["word_count"] == 2
     assert data_comp["completed_at"] is not None
 
     # 4. Failed state
@@ -613,7 +620,12 @@ async def test_get_job_redis_independence(client, db, monkeypatch):
         input_type="text_paste",
         raw_transcript="Testing direct PostgreSQL read without Redis.",
         status="complete",
-        result={"processor": "milestone_5", "processed": True, "job_id": "test_indep"},
+        result={
+            "processor": "clarityai-pipeline",
+            "version": "0.1.0",
+            "job_id": "test_indep",
+            "metadata": {"character_count": 45, "word_count": 6, "line_count": 1},
+        },
     )
     db.add(job)
     db.commit()
@@ -627,5 +639,43 @@ async def test_get_job_redis_independence(client, db, monkeypatch):
     response = await client.get(f"{settings.API_V1_STR}/jobs/{job.id}", headers=headers)
     assert response.status_code == 200
     assert response.json()["status"] == "complete"
-    assert response.json()["result"]["processed"] is True
+    assert response.json()["result"]["processor"] == "clarityai-pipeline"
+
+
+@pytest.mark.anyio
+async def test_job_create_worker_process_and_retrieve_e2e(client, db):
+    from app.worker.tasks import process_job
+
+    token = await register_and_get_token(client, email="e2e_pipeline_user@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    transcript = "   Executive meeting: Approved cloud infrastructure budget and headcount for Q3.   "
+    res_create = await client.post(
+        f"{settings.API_V1_STR}/jobs",
+        json={"input_type": "text_paste", "content": transcript},
+        headers=headers,
+    )
+    assert res_create.status_code == 201
+    job_id = res_create.json()["id"]
+
+    # Verify initial pending state
+    res_pending = await client.get(f"{settings.API_V1_STR}/jobs/{job_id}", headers=headers)
+    assert res_pending.status_code == 200
+    assert res_pending.json()["status"] == "pending"
+
+    # Worker processes the job through M7 pipeline
+    process_job.apply(args=[job_id]).get()
+
+    # Verify completed state with M7 pipeline result
+    res_completed = await client.get(f"{settings.API_V1_STR}/jobs/{job_id}", headers=headers)
+    assert res_completed.status_code == 200
+    comp_data = res_completed.json()
+    assert comp_data["status"] == "complete"
+    assert comp_data["result"]["processor"] == "clarityai-pipeline"
+    assert comp_data["result"]["version"] == "0.1.0"
+    assert comp_data["result"]["job_id"] == job_id
+    assert comp_data["result"]["metadata"]["word_count"] == 10
+    assert comp_data["result"]["metadata"]["line_count"] == 1
+    assert comp_data["completed_at"] is not None
+
 

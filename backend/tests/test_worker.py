@@ -7,8 +7,15 @@ from celery.exceptions import MaxRetriesExceededError, Retry
 from app.core.config import settings
 from app.models.job import Job
 from app.models.user import User
+from app.processing import (
+    ProcessingStage,
+    ProcessingContext,
+    ProcessingPipeline,
+    ProcessingError,
+)
 from app.worker.celery_app import celery_app
-from app.worker.tasks import process_job, _job_processor_hook
+from app.worker.tasks import process_job
+import app.worker.tasks as tasks_module
 
 
 # ==========================================
@@ -58,9 +65,14 @@ def test_process_job_successful_lifecycle(db):
     updated_job = db.query(Job).filter(Job.id == job.id).first()
     assert updated_job.status == "complete"
     assert updated_job.result == {
-        "processor": "milestone_5",
-        "processed": True,
+        "processor": "clarityai-pipeline",
+        "version": "0.1.0",
         "job_id": job_id_str,
+        "metadata": {
+            "character_count": len("Sprint retrospective discussion notes."),
+            "word_count": 4,
+            "line_count": 1,
+        },
     }
     assert updated_job.completed_at is not None
     assert updated_job.retry_count == 0
@@ -129,13 +141,19 @@ def test_process_job_transient_failure_and_retry(db, monkeypatch):
 
     attempts = {"count": 0}
 
-    def flaky_processor(j: Job):
-        attempts["count"] += 1
-        if attempts["count"] == 1:
-            raise ConnectionError("Temporary connection timeout")
-        return {"processor": "milestone_5", "processed": True, "job_id": str(j.id)}
+    class FlakyStage(ProcessingStage):
+        @property
+        def name(self) -> str:
+            return "flaky"
 
-    monkeypatch.setattr("app.worker.tasks._job_processor_hook", flaky_processor)
+        def process(self, context: ProcessingContext) -> ProcessingContext:
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise ConnectionError("Temporary connection timeout")
+            return context
+
+    flaky_pipeline = ProcessingPipeline(stages=[FlakyStage()])
+    monkeypatch.setattr(tasks_module, "_pipeline_override", flaky_pipeline)
 
     # Attempt 1: raises Retry
     with pytest.raises(Retry):
@@ -152,7 +170,7 @@ def test_process_job_transient_failure_and_retry(db, monkeypatch):
     db.expire_all()
     final_job = db.query(Job).filter(Job.id == job.id).first()
     assert final_job.status == "complete"
-    assert final_job.result["processed"] is True
+    assert final_job.result["processor"] == "clarityai-pipeline"
 
 
 def test_process_job_permanent_failure_exhausted_retries(db, monkeypatch):
@@ -174,10 +192,16 @@ def test_process_job_permanent_failure_exhausted_retries(db, monkeypatch):
     db.commit()
     db.refresh(job)
 
-    def broken_processor(j: Job):
-        raise RuntimeError("Unrecoverable internal failure")
+    class BrokenStage(ProcessingStage):
+        @property
+        def name(self) -> str:
+            return "broken"
 
-    monkeypatch.setattr("app.worker.tasks._job_processor_hook", broken_processor)
+        def process(self, context: ProcessingContext) -> ProcessingContext:
+            raise ProcessingError("Unrecoverable internal failure")
+
+    broken_pipeline = ProcessingPipeline(stages=[BrokenStage()])
+    monkeypatch.setattr(tasks_module, "_pipeline_override", broken_pipeline)
 
     # Exhaust retries: max_retries = 3
     with pytest.raises(MaxRetriesExceededError):
@@ -188,7 +212,6 @@ def test_process_job_permanent_failure_exhausted_retries(db, monkeypatch):
     assert failed_job.status == "failed"
     assert "error" in failed_job.result
     assert failed_job.retry_count == settings.CELERY_TASK_MAX_RETRIES
-
 
 
 def test_process_job_nonexistent_job_id():

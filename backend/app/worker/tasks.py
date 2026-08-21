@@ -7,20 +7,13 @@ from celery.exceptions import MaxRetriesExceededError
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.job import Job
+from app.processing import ProcessingContext, ProcessingPipeline, create_default_pipeline
 from app.worker.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
-# Customizable processor hook for deterministic testing
-_job_processor_hook: Optional[Callable[[Job], Dict[str, Any]]] = None
-
-
-def default_placeholder_processor(job: Job) -> Dict[str, Any]:
-    return {
-        "processor": "milestone_5",
-        "processed": True,
-        "job_id": str(job.id),
-    }
+default_pipeline: ProcessingPipeline = create_default_pipeline()
+_pipeline_override: Optional[ProcessingPipeline] = None
 
 
 @celery_app.task(
@@ -54,8 +47,13 @@ def process_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         db.refresh(job)
         logger.info(f"Job processing started: job_id={job_id}")
 
-        processor = _job_processor_hook or default_placeholder_processor
-        result_data = processor(job)
+        context = ProcessingContext(
+            job_id=str(job.id),
+            transcript=job.raw_transcript or "",
+        )
+        pipeline = _pipeline_override or default_pipeline
+        processing_result = pipeline.process(context)
+        result_data = processing_result.model_dump()
 
         job.status = "complete"
         job.result = result_data
@@ -64,6 +62,7 @@ def process_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         db.refresh(job)
         logger.info(f"Job completed successfully: job_id={job_id}")
         return job.result
+
 
     except Exception as exc:
         logger.warning(f"Error processing job {job_id}: {exc}")
