@@ -1,14 +1,16 @@
-from typing import List, Optional
+from app.llm.base import LLMProvider
+from app.llm.openai_provider import OpenAIProvider
 from app.processing.base import ProcessingStage
 from app.processing.models import ProcessingContext, ProcessingResult, TranscriptMetadata
 from app.processing.exceptions import ProcessingError, PipelineExecutionError, InvalidProcessingContextError
 from app.processing.stages.normalize import NormalizeStage
 from app.processing.stages.analyze import AnalyzeStage
+from app.processing.stages.ai_analysis import AIAnalysisStage
 
 
 class ProcessingPipeline:
-    def __init__(self, stages: Optional[List[ProcessingStage]] = None):
-        self.stages: List[ProcessingStage] = (
+    def __init__(self, stages: list[ProcessingStage] | None = None):
+        self.stages: list[ProcessingStage] = (
             stages
             if stages is not None
             else [
@@ -37,11 +39,19 @@ class ProcessingPipeline:
         metadata = current_context.metadata or TranscriptMetadata()
         return ProcessingResult(
             processor="clarityai-pipeline",
-            version="0.1.0",
+            version="0.2.0",
             job_id=current_context.job_id,
             metadata=metadata,
+            ai_analysis=current_context.ai_analysis,
         )
 
 
-def create_default_pipeline() -> ProcessingPipeline:
-    return ProcessingPipeline()
+def create_default_pipeline(llm_provider: LLMProvider | None = None) -> ProcessingPipeline:
+    provider = llm_provider if llm_provider is not None else OpenAIProvider()
+    return ProcessingPipeline(
+        stages=[
+            NormalizeStage(),
+            AnalyzeStage(),
+            AIAnalysisStage(provider=provider),
+        ]
+    )

@@ -1,13 +1,18 @@
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Dict, Any
 from celery.exceptions import MaxRetriesExceededError
 
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.job import Job
 from app.processing import ProcessingContext, ProcessingPipeline, create_default_pipeline
+from app.llm.exceptions import (
+    LLMConfigurationError,
+    LLMInputTooLargeError,
+    LLMResponseValidationError,
+)
 from app.worker.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -63,23 +68,35 @@ def process_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         logger.info(f"Job completed successfully: job_id={job_id}")
         return job.result
 
-
     except Exception as exc:
         logger.warning(f"Error processing job {job_id}: {exc}")
         retries_so_far = self.request.retries
         next_retry_count = retries_so_far + 1
 
-        if retries_so_far >= self.max_retries:
-            logger.error(f"Max retries ({self.max_retries}) exceeded for job {job_id}. Marking as failed.")
+        is_non_retryable = isinstance(
+            exc,
+            (
+                LLMConfigurationError,
+                LLMInputTooLargeError,
+                LLMResponseValidationError,
+            ),
+        )
+
+        if retries_so_far >= self.max_retries or is_non_retryable:
+            reason = "non-retryable error" if is_non_retryable else f"max retries ({self.max_retries}) exceeded"
+            logger.error(f"Job {job_id} failed permanently ({reason}). Marking as failed.")
             try:
                 job = db.query(Job).filter(Job.id == job_uuid).first()
                 if job:
                     job.status = "failed"
                     job.retry_count = retries_so_far
-                    job.result = {"error": f"Processing failed after maximum retries exceeded: {exc}"}
+                    job.result = {"error": f"Processing failed: {exc}"}
                     db.commit()
             except Exception as final_exc:
                 logger.error(f"Failed to set status=failed for job {job_id}: {final_exc}")
+
+            if is_non_retryable:
+                raise
             raise MaxRetriesExceededError(f"Job {job_id} failed after {self.max_retries} retries: {exc}") from exc
 
         try:
@@ -92,7 +109,6 @@ def process_job(self, job_id: str) -> Optional[Dict[str, Any]]:
 
         logger.info(f"Retrying job {job_id} (attempt {next_retry_count}/{self.max_retries})")
         raise self.retry(exc=exc)
-
 
     finally:
         db.close()

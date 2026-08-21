@@ -1,4 +1,6 @@
 import pytest
+from app.llm.models import ActionItem, AIAnalysis
+from app.llm.fake_provider import FakeLLMProvider
 from app.processing import (
     ProcessingContext,
     ProcessingResult,
@@ -12,6 +14,7 @@ from app.processing import (
 )
 from app.processing.stages.normalize import NormalizeStage
 from app.processing.stages.analyze import AnalyzeStage
+from app.processing.stages.ai_analysis import AIAnalysisStage
 
 
 # ==========================================
@@ -26,24 +29,38 @@ def test_processing_context_initialization():
     assert context.job_id == "test-job-123"
     assert context.transcript == "Sample transcript text."
     assert context.metadata is None
+    assert context.ai_analysis is None
 
 
 def test_processing_result_serialization():
+    analysis = AIAnalysis(
+        summary="Short summary",
+        key_points=["Point 1"],
+        action_items=[ActionItem(task="Task 1", owner="Alice")],
+        sentiment="neutral",
+    )
     result = ProcessingResult(
         processor="clarityai-pipeline",
-        version="0.1.0",
+        version="0.2.0",
         job_id="test-job-123",
         metadata=TranscriptMetadata(character_count=20, word_count=3, line_count=1),
+        ai_analysis=analysis,
     )
     dumped = result.model_dump()
     assert dumped == {
         "processor": "clarityai-pipeline",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "job_id": "test-job-123",
         "metadata": {
             "character_count": 20,
             "word_count": 3,
             "line_count": 1,
+        },
+        "ai_analysis": {
+            "summary": "Short summary",
+            "key_points": ["Point 1"],
+            "action_items": [{"task": "Task 1", "owner": "Alice"}],
+            "sentiment": "neutral",
         },
     }
 
@@ -109,7 +126,6 @@ def test_analyze_stage_multiline_statistics():
     assert updated.metadata is not None
     assert updated.metadata.line_count == 3
     assert updated.metadata.word_count == 12
-
     assert updated.metadata.character_count == len(context.transcript)
 
 
@@ -124,11 +140,42 @@ def test_analyze_stage_empty_text():
 
 
 # ==========================================
+# AIAnalysisStage Tests
+# ==========================================
+
+def test_ai_analysis_stage_execution():
+    fake_provider = FakeLLMProvider()
+    stage = AIAnalysisStage(provider=fake_provider)
+    assert stage.name == "ai_analysis"
+
+    context = ProcessingContext(
+        job_id="job-ai",
+        transcript="Leadership alignment on engineering roadmap.",
+    )
+    updated = stage.process(context)
+    assert updated.ai_analysis is not None
+    assert isinstance(updated.ai_analysis, AIAnalysis)
+    assert updated.ai_analysis.sentiment == "positive"
+    assert len(updated.ai_analysis.key_points) >= 1
+
+
+def test_ai_analysis_stage_none_transcript_raises():
+    fake_provider = FakeLLMProvider()
+    stage = AIAnalysisStage(provider=fake_provider)
+    context = ProcessingContext(job_id="job-ai", transcript="")
+    context.transcript = None  # type: ignore
+    with pytest.raises(InvalidProcessingContextError):
+        stage.process(context)
+
+
+# ==========================================
 # ProcessingPipeline Tests
 # ==========================================
 
-def test_pipeline_ordered_execution():
-    pipeline = create_default_pipeline()
+def test_pipeline_ordered_execution_with_ai_stage():
+    fake_provider = FakeLLMProvider()
+    pipeline = create_default_pipeline(llm_provider=fake_provider)
+
     context = ProcessingContext(
         job_id="pipeline-job-123",
         transcript="   \n  Sprint Retrospective Discussion.  \n  Team velocity was excellent.  \n   ",
@@ -136,11 +183,13 @@ def test_pipeline_ordered_execution():
 
     result = pipeline.process(context)
     assert result.processor == "clarityai-pipeline"
-    assert result.version == "0.1.0"
+    assert result.version == "0.2.0"
     assert result.job_id == "pipeline-job-123"
     assert result.metadata.word_count == 7
     assert result.metadata.line_count == 2
-    assert result.metadata.character_count == len("Sprint Retrospective Discussion.\nTeam velocity was excellent.")
+    assert result.ai_analysis is not None
+    assert result.ai_analysis.sentiment == "positive"
+    assert len(result.ai_analysis.action_items) == 2
 
 
 def test_pipeline_open_closed_stage_extensibility():
@@ -164,10 +213,11 @@ def test_pipeline_open_closed_stage_extensibility():
     assert context.transcript == "HELLO WORLD"
     assert result.metadata.word_count == 2
     assert result.metadata.character_count == 11
+    assert result.ai_analysis is None
 
 
 def test_pipeline_invalid_context_raises():
-    pipeline = create_default_pipeline()
+    pipeline = create_default_pipeline(llm_provider=FakeLLMProvider())
     context = ProcessingContext(job_id="", transcript="")
     with pytest.raises(InvalidProcessingContextError):
         pipeline.process(context)

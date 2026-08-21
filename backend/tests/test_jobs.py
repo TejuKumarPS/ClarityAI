@@ -541,9 +541,15 @@ async def test_get_job_all_lifecycle_states(client, db):
         status="complete",
         result={
             "processor": "clarityai-pipeline",
-            "version": "0.1.0",
+            "version": "0.2.0",
             "job_id": "test_id",
             "metadata": {"character_count": 21, "word_count": 2, "line_count": 1},
+            "ai_analysis": {
+                "summary": "Completed meeting summary",
+                "key_points": ["Point 1"],
+                "action_items": [],
+                "sentiment": "neutral",
+            },
         },
         completed_at=now_utc,
         retry_count=0,
@@ -555,8 +561,9 @@ async def test_get_job_all_lifecycle_states(client, db):
     data_comp = res_complete.json()
     assert data_comp["status"] == "complete"
     assert data_comp["result"]["processor"] == "clarityai-pipeline"
-    assert data_comp["result"]["version"] == "0.1.0"
+    assert data_comp["result"]["version"] == "0.2.0"
     assert data_comp["result"]["metadata"]["word_count"] == 2
+    assert data_comp["result"]["ai_analysis"]["summary"] == "Completed meeting summary"
     assert data_comp["completed_at"] is not None
 
     # 4. Failed state
@@ -622,9 +629,10 @@ async def test_get_job_redis_independence(client, db, monkeypatch):
         status="complete",
         result={
             "processor": "clarityai-pipeline",
-            "version": "0.1.0",
+            "version": "0.2.0",
             "job_id": "test_indep",
             "metadata": {"character_count": 45, "word_count": 6, "line_count": 1},
+            "ai_analysis": None,
         },
     )
     db.add(job)
@@ -643,8 +651,14 @@ async def test_get_job_redis_independence(client, db, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_job_create_worker_process_and_retrieve_e2e(client, db):
+async def test_job_create_worker_process_and_retrieve_e2e(client, db, monkeypatch):
+    from app.processing import create_default_pipeline
+    from app.llm.fake_provider import FakeLLMProvider
     from app.worker.tasks import process_job
+    import app.worker.tasks as tasks_module
+
+    test_pipeline = create_default_pipeline(llm_provider=FakeLLMProvider())
+    monkeypatch.setattr(tasks_module, "_pipeline_override", test_pipeline)
 
     token = await register_and_get_token(client, email="e2e_pipeline_user@example.com")
     headers = {"Authorization": f"Bearer {token}"}
@@ -663,19 +677,23 @@ async def test_job_create_worker_process_and_retrieve_e2e(client, db):
     assert res_pending.status_code == 200
     assert res_pending.json()["status"] == "pending"
 
-    # Worker processes the job through M7 pipeline
+    # Worker processes the job through M8 pipeline
     process_job.apply(args=[job_id]).get()
 
-    # Verify completed state with M7 pipeline result
+    # Verify completed state with M8 pipeline result
     res_completed = await client.get(f"{settings.API_V1_STR}/jobs/{job_id}", headers=headers)
     assert res_completed.status_code == 200
     comp_data = res_completed.json()
     assert comp_data["status"] == "complete"
     assert comp_data["result"]["processor"] == "clarityai-pipeline"
-    assert comp_data["result"]["version"] == "0.1.0"
+    assert comp_data["result"]["version"] == "0.2.0"
     assert comp_data["result"]["job_id"] == job_id
     assert comp_data["result"]["metadata"]["word_count"] == 10
     assert comp_data["result"]["metadata"]["line_count"] == 1
+    assert comp_data["result"]["ai_analysis"] is not None
+    assert comp_data["result"]["ai_analysis"]["sentiment"] == "positive"
+    assert len(comp_data["result"]["ai_analysis"]["action_items"]) == 2
     assert comp_data["completed_at"] is not None
+
 
 

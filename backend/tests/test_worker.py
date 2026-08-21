@@ -7,11 +7,14 @@ from celery.exceptions import MaxRetriesExceededError, Retry
 from app.core.config import settings
 from app.models.job import Job
 from app.models.user import User
+from app.llm.fake_provider import FakeLLMProvider
+from app.llm.exceptions import LLMInputTooLargeError
 from app.processing import (
     ProcessingStage,
     ProcessingContext,
     ProcessingPipeline,
     ProcessingError,
+    create_default_pipeline,
 )
 from app.worker.celery_app import celery_app
 from app.worker.tasks import process_job
@@ -38,7 +41,10 @@ def test_celery_broker_connection():
 # Celery Task Integration Tests
 # ==========================================
 
-def test_process_job_successful_lifecycle(db):
+def test_process_job_successful_lifecycle(db, monkeypatch):
+    test_pipeline = create_default_pipeline(llm_provider=FakeLLMProvider())
+    monkeypatch.setattr(tasks_module, "_pipeline_override", test_pipeline)
+
     user = User(
         email=f"worker_test_{uuid.uuid4().hex[:6]}@example.com",
         password_hash="mockhash",
@@ -64,16 +70,13 @@ def test_process_job_successful_lifecycle(db):
     db.expire_all()
     updated_job = db.query(Job).filter(Job.id == job.id).first()
     assert updated_job.status == "complete"
-    assert updated_job.result == {
-        "processor": "clarityai-pipeline",
-        "version": "0.1.0",
-        "job_id": job_id_str,
-        "metadata": {
-            "character_count": len("Sprint retrospective discussion notes."),
-            "word_count": 4,
-            "line_count": 1,
-        },
-    }
+    assert updated_job.result["processor"] == "clarityai-pipeline"
+    assert updated_job.result["version"] == "0.2.0"
+    assert updated_job.result["job_id"] == job_id_str
+    assert updated_job.result["metadata"]["word_count"] == 4
+    assert updated_job.result["ai_analysis"] is not None
+    assert updated_job.result["ai_analysis"]["sentiment"] == "positive"
+    assert len(updated_job.result["ai_analysis"]["action_items"]) == 2
     assert updated_job.completed_at is not None
     assert updated_job.retry_count == 0
     assert result == updated_job.result
@@ -83,7 +86,10 @@ def test_process_job_successful_lifecycle(db):
     assert count == 1
 
 
-def test_process_job_idempotency_duplicate_execution(db):
+def test_process_job_idempotency_duplicate_execution(db, monkeypatch):
+    test_pipeline = create_default_pipeline(llm_provider=FakeLLMProvider())
+    monkeypatch.setattr(tasks_module, "_pipeline_override", test_pipeline)
+
     user = User(
         email=f"idempotent_{uuid.uuid4().hex[:6]}@example.com",
         password_hash="mockhash",
@@ -212,6 +218,46 @@ def test_process_job_permanent_failure_exhausted_retries(db, monkeypatch):
     assert failed_job.status == "failed"
     assert "error" in failed_job.result
     assert failed_job.retry_count == settings.CELERY_TASK_MAX_RETRIES
+
+
+def test_process_job_non_retryable_error_fails_immediately(db, monkeypatch):
+    user = User(
+        email=f"nonretry_user_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash="mockhash",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    job = Job(
+        user_id=user.id,
+        input_type="text_paste",
+        raw_transcript="Oversized transcript text.",
+        status="pending",
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    class OversizedStage(ProcessingStage):
+        @property
+        def name(self) -> str:
+            return "oversized"
+
+        def process(self, context: ProcessingContext) -> ProcessingContext:
+            raise LLMInputTooLargeError("Transcript exceeds maximum allowed characters")
+
+    pipeline = ProcessingPipeline(stages=[OversizedStage()])
+    monkeypatch.setattr(tasks_module, "_pipeline_override", pipeline)
+
+    with pytest.raises(LLMInputTooLargeError):
+        process_job.apply(args=[str(job.id)], throw=True)
+
+    db.expire_all()
+    failed_job = db.query(Job).filter(Job.id == job.id).first()
+    assert failed_job.status == "failed"
+    assert "Transcript exceeds" in str(failed_job.result)
+    assert failed_job.retry_count == 0  # Not retried
 
 
 def test_process_job_nonexistent_job_id():

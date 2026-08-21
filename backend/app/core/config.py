@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     CELERY_TASK_MAX_RETRIES: int = 3
     CELERY_TASK_RETRY_BACKOFF: int = 1
 
+    OPENAI_API_KEY: str | None = None
+    OPENAI_MODEL: str = "gpt-4o-mini"
+    MAX_LLM_INPUT_CHARACTERS: int = 100_000
+
+
 
 
     @field_validator("CORS_ORIGINS", mode="before")
