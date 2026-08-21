@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
+    MAX_INPUT_FILE_SIZE_BYTES: int = 10 * 1024 * 1024
+    MIN_TRANSCRIPT_LENGTH: int = 10
+
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: Union[str, List[str]]) -> List[str]:
