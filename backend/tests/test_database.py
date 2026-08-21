@@ -170,3 +170,38 @@ def test_user_deletion_restricted_no_cascade(db):
     with pytest.raises(IntegrityError):
         db.commit()
 
+
+def test_job_observability_fields_defaults_and_population(db):
+    user = User(
+        email="observability_test@example.com",
+        password_hash="hash_obs",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    job = Job(
+        user_id=user.id,
+        input_type="text_paste",
+        raw_transcript="Testing observability fields in database.",
+        processing_duration_ms=1250,
+        llm_provider="openai",
+        llm_model="gpt-4o-mini",
+        llm_input_tokens=150,
+        llm_output_tokens=75,
+        llm_total_tokens=225,
+        error_code=None,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    assert job.processing_duration_ms == 1250
+    assert job.llm_provider == "openai"
+    assert job.llm_model == "gpt-4o-mini"
+    assert job.llm_input_tokens == 150
+    assert job.llm_output_tokens == 75
+    assert job.llm_total_tokens == 225
+    assert job.error_code is None
+
+

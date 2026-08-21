@@ -1,4 +1,4 @@
-from app.llm.models import ActionItem, AIAnalysis, SentimentType
+from app.llm.models import ActionItem, AIAnalysis, SentimentType, LLMUsage, LLMResponse
 from app.llm.exceptions import (
     LLMError,
     LLMConfigurationError,
@@ -14,6 +14,8 @@ __all__ = [
     "ActionItem",
     "AIAnalysis",
     "SentimentType",
+    "LLMUsage",
+    "LLMResponse",
     "LLMError",
     "LLMConfigurationError",
     "LLMInputTooLargeError",

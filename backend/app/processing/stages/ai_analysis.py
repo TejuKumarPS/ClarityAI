@@ -16,6 +16,9 @@ class AIAnalysisStage(ProcessingStage):
         if not context or context.transcript is None:
             raise InvalidProcessingContextError("Context and transcript must not be None")
 
-        analysis = self.provider.analyze(context.transcript)
-        context.ai_analysis = analysis
+        response = self.provider.analyze(context.transcript)
+        context.ai_analysis = response.analysis
+        context.llm_usage = response.usage
+        context.llm_provider = response.provider
+        context.llm_model = response.model
         return context

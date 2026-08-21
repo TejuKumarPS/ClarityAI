@@ -1,5 +1,5 @@
 import pytest
-from app.llm.models import ActionItem, AIAnalysis
+from app.llm.models import ActionItem, AIAnalysis, LLMUsage
 from app.llm.fake_provider import FakeLLMProvider
 from app.processing import (
     ProcessingContext,
@@ -30,6 +30,9 @@ def test_processing_context_initialization():
     assert context.transcript == "Sample transcript text."
     assert context.metadata is None
     assert context.ai_analysis is None
+    assert context.llm_usage is None
+    assert context.llm_provider is None
+    assert context.llm_model is None
 
 
 def test_processing_result_serialization():
@@ -39,17 +42,21 @@ def test_processing_result_serialization():
         action_items=[ActionItem(task="Task 1", owner="Alice")],
         sentiment="neutral",
     )
+    usage = LLMUsage(input_tokens=100, output_tokens=50, total_tokens=150)
     result = ProcessingResult(
         processor="clarityai-pipeline",
-        version="0.2.0",
+        version="0.3.0",
         job_id="test-job-123",
         metadata=TranscriptMetadata(character_count=20, word_count=3, line_count=1),
         ai_analysis=analysis,
+        llm_usage=usage,
+        llm_provider="openai",
+        llm_model="gpt-4o-mini",
     )
     dumped = result.model_dump()
     assert dumped == {
         "processor": "clarityai-pipeline",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "job_id": "test-job-123",
         "metadata": {
             "character_count": 20,
@@ -62,6 +69,13 @@ def test_processing_result_serialization():
             "action_items": [{"task": "Task 1", "owner": "Alice"}],
             "sentiment": "neutral",
         },
+        "llm_usage": {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "total_tokens": 150,
+        },
+        "llm_provider": "openai",
+        "llm_model": "gpt-4o-mini",
     }
 
 
@@ -157,6 +171,10 @@ def test_ai_analysis_stage_execution():
     assert isinstance(updated.ai_analysis, AIAnalysis)
     assert updated.ai_analysis.sentiment == "positive"
     assert len(updated.ai_analysis.key_points) >= 1
+    assert updated.llm_usage is not None
+    assert updated.llm_usage.total_tokens == 150
+    assert updated.llm_provider == "fake"
+    assert updated.llm_model == "fake-model"
 
 
 def test_ai_analysis_stage_none_transcript_raises():
@@ -183,13 +201,19 @@ def test_pipeline_ordered_execution_with_ai_stage():
 
     result = pipeline.process(context)
     assert result.processor == "clarityai-pipeline"
-    assert result.version == "0.2.0"
+    assert result.version == "0.3.0"
     assert result.job_id == "pipeline-job-123"
     assert result.metadata.word_count == 7
     assert result.metadata.line_count == 2
     assert result.ai_analysis is not None
     assert result.ai_analysis.sentiment == "positive"
     assert len(result.ai_analysis.action_items) == 2
+    assert result.llm_usage is not None
+    assert result.llm_usage.input_tokens == 100
+    assert result.llm_usage.output_tokens == 50
+    assert result.llm_usage.total_tokens == 150
+    assert result.llm_provider == "fake"
+    assert result.llm_model == "fake-model"
 
 
 def test_pipeline_open_closed_stage_extensibility():
@@ -214,6 +238,7 @@ def test_pipeline_open_closed_stage_extensibility():
     assert result.metadata.word_count == 2
     assert result.metadata.character_count == 11
     assert result.ai_analysis is None
+    assert result.llm_usage is None
 
 
 def test_pipeline_invalid_context_raises():

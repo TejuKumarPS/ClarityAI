@@ -1,4 +1,5 @@
 import uuid
+import time
 from datetime import datetime, timezone
 import pytest
 import redis
@@ -42,7 +43,8 @@ def test_celery_broker_connection():
 # ==========================================
 
 def test_process_job_successful_lifecycle(db, monkeypatch):
-    test_pipeline = create_default_pipeline(llm_provider=FakeLLMProvider())
+    fake_provider = FakeLLMProvider()
+    test_pipeline = create_default_pipeline(llm_provider=fake_provider)
     monkeypatch.setattr(tasks_module, "_pipeline_override", test_pipeline)
 
     user = User(
@@ -71,23 +73,40 @@ def test_process_job_successful_lifecycle(db, monkeypatch):
     updated_job = db.query(Job).filter(Job.id == job.id).first()
     assert updated_job.status == "complete"
     assert updated_job.result["processor"] == "clarityai-pipeline"
-    assert updated_job.result["version"] == "0.2.0"
+    assert updated_job.result["version"] == "0.3.0"
     assert updated_job.result["job_id"] == job_id_str
     assert updated_job.result["metadata"]["word_count"] == 4
     assert updated_job.result["ai_analysis"] is not None
     assert updated_job.result["ai_analysis"]["sentiment"] == "positive"
     assert len(updated_job.result["ai_analysis"]["action_items"]) == 2
-    assert updated_job.completed_at is not None
-    assert updated_job.retry_count == 0
-    assert result == updated_job.result
 
-    # Verify no duplicate rows
-    count = db.query(Job).filter(Job.id == job.id).count()
-    assert count == 1
+    # Observability columns verification
+    assert updated_job.processing_started_at is not None
+    assert updated_job.completed_at is not None
+    assert isinstance(updated_job.processing_duration_ms, int)
+    assert updated_job.processing_duration_ms >= 0
+    assert updated_job.llm_provider == "fake"
+    assert updated_job.llm_model == "fake-model"
+    assert updated_job.llm_input_tokens == 100
+    assert updated_job.llm_output_tokens == 50
+    assert updated_job.llm_total_tokens == 150
+    assert updated_job.error_code is None
+    assert updated_job.retry_count == 0
+
+    # DB observability fields match ProcessingResult LLM metadata
+    assert updated_job.llm_input_tokens == updated_job.result["llm_usage"]["input_tokens"]
+    assert updated_job.llm_output_tokens == updated_job.result["llm_usage"]["output_tokens"]
+    assert updated_job.llm_total_tokens == updated_job.result["llm_usage"]["total_tokens"]
+    assert updated_job.llm_provider == updated_job.result["llm_provider"]
+    assert updated_job.llm_model == updated_job.result["llm_model"]
+
+    assert result == updated_job.result
+    assert db.query(Job).filter(Job.id == job.id).count() == 1
 
 
 def test_process_job_idempotency_duplicate_execution(db, monkeypatch):
-    test_pipeline = create_default_pipeline(llm_provider=FakeLLMProvider())
+    fake_provider = FakeLLMProvider()
+    test_pipeline = create_default_pipeline(llm_provider=fake_provider)
     monkeypatch.setattr(tasks_module, "_pipeline_override", test_pipeline)
 
     user = User(
@@ -110,18 +129,28 @@ def test_process_job_idempotency_duplicate_execution(db, monkeypatch):
 
     # First execution
     res1 = process_job.apply(args=[str(job.id)]).get()
+    assert fake_provider.call_count == 1
 
     db.expire_all()
     completed_job = db.query(Job).filter(Job.id == job.id).first()
     original_completed_at = completed_job.completed_at
+    original_started_at = completed_job.processing_started_at
+    original_duration_ms = completed_job.processing_duration_ms
+    original_tokens = completed_job.llm_total_tokens
 
     # Second execution (duplicate message)
     res2 = process_job.apply(args=[str(job.id)]).get()
+
+    # Provider must NOT have been called again
+    assert fake_provider.call_count == 1
 
     db.expire_all()
     rechecked_job = db.query(Job).filter(Job.id == job.id).first()
     assert rechecked_job.status == "complete"
     assert rechecked_job.completed_at == original_completed_at
+    assert rechecked_job.processing_started_at == original_started_at
+    assert rechecked_job.processing_duration_ms == original_duration_ms
+    assert rechecked_job.llm_total_tokens == original_tokens
     assert res1 == res2
     assert db.query(Job).filter(Job.id == job.id).count() == 1
 
@@ -169,6 +198,12 @@ def test_process_job_transient_failure_and_retry(db, monkeypatch):
     retried_job = db.query(Job).filter(Job.id == job.id).first()
     assert retried_job.retry_count == 1
     assert retried_job.status == "processing"
+    # Retry attempt must NOT persist terminal duration
+    assert retried_job.processing_duration_ms is None
+    first_attempt_start = retried_job.processing_started_at
+    assert first_attempt_start is not None
+
+    time.sleep(0.01)
 
     # Attempt 2: succeeds
     process_job.apply(args=[str(job.id)], retries=1, throw=True)
@@ -177,6 +212,11 @@ def test_process_job_transient_failure_and_retry(db, monkeypatch):
     final_job = db.query(Job).filter(Job.id == job.id).first()
     assert final_job.status == "complete"
     assert final_job.result["processor"] == "clarityai-pipeline"
+    # Final retry persists terminal duration
+    assert final_job.processing_duration_ms is not None
+    assert final_job.processing_duration_ms >= 0
+    # Next retry replaced processing_started_at with its own start time
+    assert final_job.processing_started_at >= first_attempt_start
 
 
 def test_process_job_permanent_failure_exhausted_retries(db, monkeypatch):
@@ -216,8 +256,16 @@ def test_process_job_permanent_failure_exhausted_retries(db, monkeypatch):
     db.expire_all()
     failed_job = db.query(Job).filter(Job.id == job.id).first()
     assert failed_job.status == "failed"
-    assert "error" in failed_job.result
+    assert failed_job.error_code == "PROCESSING_ERROR"
+    assert failed_job.result == {
+        "error": {
+            "code": "PROCESSING_ERROR",
+            "message": "An unexpected error occurred during job processing",
+        }
+    }
     assert failed_job.retry_count == settings.CELERY_TASK_MAX_RETRIES
+    assert isinstance(failed_job.processing_duration_ms, int)
+    assert failed_job.processing_duration_ms >= 0
 
 
 def test_process_job_non_retryable_error_fails_immediately(db, monkeypatch):
@@ -256,8 +304,16 @@ def test_process_job_non_retryable_error_fails_immediately(db, monkeypatch):
     db.expire_all()
     failed_job = db.query(Job).filter(Job.id == job.id).first()
     assert failed_job.status == "failed"
-    assert "Transcript exceeds" in str(failed_job.result)
+    assert failed_job.error_code == "LLM_INPUT_TOO_LARGE"
+    assert failed_job.result == {
+        "error": {
+            "code": "LLM_INPUT_TOO_LARGE",
+            "message": "Transcript exceeds maximum allowed input size",
+        }
+    }
     assert failed_job.retry_count == 0  # Not retried
+    assert isinstance(failed_job.processing_duration_ms, int)
+    assert failed_job.processing_duration_ms >= 0
 
 
 def test_process_job_nonexistent_job_id():

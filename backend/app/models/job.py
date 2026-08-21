@@ -1,5 +1,6 @@
 import uuid
 from typing import Optional, Any
+from datetime import datetime
 from sqlalchemy import String, Text, Integer, DateTime, ForeignKey, func
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -42,13 +43,47 @@ class Job(Base):
         default=0,
         nullable=False,
     )
-    created_at: Mapped[DateTime] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
     )
-    completed_at: Mapped[Optional[DateTime]] = mapped_column(
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Milestone 9 Observability Columns
+    processing_started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    processing_duration_ms: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    llm_provider: Mapped[Optional[str]] = mapped_column(
+        String,
+        nullable=True,
+    )
+    llm_model: Mapped[Optional[str]] = mapped_column(
+        String,
+        nullable=True,
+    )
+    llm_input_tokens: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    llm_output_tokens: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    llm_total_tokens: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    error_code: Mapped[Optional[str]] = mapped_column(
+        String,
         nullable=True,
     )
 

@@ -4,7 +4,7 @@ import openai
 
 from app.core.config import settings
 from app.llm.base import LLMProvider
-from app.llm.models import AIAnalysis
+from app.llm.models import AIAnalysis, LLMUsage, LLMResponse
 from app.llm.exceptions import (
     LLMError,
     LLMConfigurationError,
@@ -43,7 +43,7 @@ class OpenAIProvider(LLMProvider):
             self._client = openai.OpenAI(api_key=self.api_key)
         return self._client
 
-    def analyze(self, transcript: str) -> AIAnalysis:
+    def analyze(self, transcript: str) -> LLMResponse:
         if len(transcript) > self.max_input_chars:
             raise LLMInputTooLargeError(
                 f"Transcript length ({len(transcript)} chars) exceeds limit ({self.max_input_chars} chars)"
@@ -69,7 +69,23 @@ class OpenAIProvider(LLMProvider):
             if not parsed:
                 raise LLMResponseValidationError("Model returned empty parsed structured output")
 
-            return parsed
+            usage_info = getattr(completion, "usage", None)
+            input_tokens = getattr(usage_info, "prompt_tokens", 0) if usage_info else 0
+            output_tokens = getattr(usage_info, "completion_tokens", 0) if usage_info else 0
+            total_tokens = getattr(usage_info, "total_tokens", 0) if usage_info else 0
+
+            usage = LLMUsage(
+                input_tokens=max(0, input_tokens),
+                output_tokens=max(0, output_tokens),
+                total_tokens=max(0, total_tokens),
+            )
+
+            return LLMResponse(
+                analysis=parsed,
+                usage=usage,
+                provider="openai",
+                model=self.model,
+            )
 
         except openai.AuthenticationError as exc:
             logger.error("OpenAI authentication failed")
@@ -100,4 +116,3 @@ class OpenAIProvider(LLMProvider):
         except Exception as exc:
             logger.error(f"Unexpected error during OpenAI analysis: {exc}")
             raise LLMProviderError(f"Unexpected error in LLM provider: {exc}") from exc
-

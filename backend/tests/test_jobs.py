@@ -541,7 +541,7 @@ async def test_get_job_all_lifecycle_states(client, db):
         status="complete",
         result={
             "processor": "clarityai-pipeline",
-            "version": "0.2.0",
+            "version": "0.3.0",
             "job_id": "test_id",
             "metadata": {"character_count": 21, "word_count": 2, "line_count": 1},
             "ai_analysis": {
@@ -550,9 +550,19 @@ async def test_get_job_all_lifecycle_states(client, db):
                 "action_items": [],
                 "sentiment": "neutral",
             },
+            "llm_usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
+            "llm_provider": "openai",
+            "llm_model": "gpt-4o-mini",
         },
         completed_at=now_utc,
         retry_count=0,
+        processing_started_at=now_utc,
+        processing_duration_ms=450,
+        llm_provider="openai",
+        llm_model="gpt-4o-mini",
+        llm_input_tokens=100,
+        llm_output_tokens=50,
+        llm_total_tokens=150,
     )
     db.add(job_complete)
     db.commit()
@@ -561,10 +571,13 @@ async def test_get_job_all_lifecycle_states(client, db):
     data_comp = res_complete.json()
     assert data_comp["status"] == "complete"
     assert data_comp["result"]["processor"] == "clarityai-pipeline"
-    assert data_comp["result"]["version"] == "0.2.0"
+    assert data_comp["result"]["version"] == "0.3.0"
     assert data_comp["result"]["metadata"]["word_count"] == 2
     assert data_comp["result"]["ai_analysis"]["summary"] == "Completed meeting summary"
     assert data_comp["completed_at"] is not None
+    assert data_comp["processing_duration_ms"] == 450
+    assert data_comp["llm_provider"] == "openai"
+    assert data_comp["llm_total_tokens"] == 150
 
     # 4. Failed state
     job_failed = Job(
@@ -572,7 +585,9 @@ async def test_get_job_all_lifecycle_states(client, db):
         input_type="text_paste",
         raw_transcript="Transcript failed.",
         status="failed",
-        result={"error": "Processing failed after maximum retries exceeded"},
+        error_code="PROCESSING_ERROR",
+        processing_duration_ms=120,
+        result={"error": {"code": "PROCESSING_ERROR", "message": "An unexpected error occurred during job processing"}},
         retry_count=3,
     )
     db.add(job_failed)
@@ -581,7 +596,9 @@ async def test_get_job_all_lifecycle_states(client, db):
     assert res_failed.status_code == 200
     data_fail = res_failed.json()
     assert data_fail["status"] == "failed"
-    assert data_fail["result"] == {"error": "Processing failed after maximum retries exceeded"}
+    assert data_fail["error_code"] == "PROCESSING_ERROR"
+    assert data_fail["processing_duration_ms"] == 120
+    assert data_fail["result"]["error"]["code"] == "PROCESSING_ERROR"
     assert data_fail["retry_count"] == 3
 
 
@@ -604,8 +621,24 @@ async def test_get_job_privacy_response_schema(client, db):
     assert response.status_code == 200
     data = response.json()
 
-    # Exact expected public fields
-    allowed_fields = {"id", "input_type", "status", "result", "retry_count", "created_at", "completed_at"}
+    # Exact expected public fields for M9
+    allowed_fields = {
+        "id",
+        "input_type",
+        "status",
+        "result",
+        "retry_count",
+        "created_at",
+        "completed_at",
+        "processing_started_at",
+        "processing_duration_ms",
+        "llm_provider",
+        "llm_model",
+        "llm_input_tokens",
+        "llm_output_tokens",
+        "llm_total_tokens",
+        "error_code",
+    }
     assert set(data.keys()) == allowed_fields
 
     # Verify sensitive data is absent
@@ -629,11 +662,12 @@ async def test_get_job_redis_independence(client, db, monkeypatch):
         status="complete",
         result={
             "processor": "clarityai-pipeline",
-            "version": "0.2.0",
+            "version": "0.3.0",
             "job_id": "test_indep",
             "metadata": {"character_count": 45, "word_count": 6, "line_count": 1},
             "ai_analysis": None,
         },
+        processing_duration_ms=250,
     )
     db.add(job)
     db.commit()
@@ -648,6 +682,7 @@ async def test_get_job_redis_independence(client, db, monkeypatch):
     assert response.status_code == 200
     assert response.json()["status"] == "complete"
     assert response.json()["result"]["processor"] == "clarityai-pipeline"
+    assert response.json()["processing_duration_ms"] == 250
 
 
 @pytest.mark.anyio
@@ -676,17 +711,18 @@ async def test_job_create_worker_process_and_retrieve_e2e(client, db, monkeypatc
     res_pending = await client.get(f"{settings.API_V1_STR}/jobs/{job_id}", headers=headers)
     assert res_pending.status_code == 200
     assert res_pending.json()["status"] == "pending"
+    assert res_pending.json()["processing_duration_ms"] is None
 
-    # Worker processes the job through M8 pipeline
+    # Worker processes the job through M9 pipeline
     process_job.apply(args=[job_id]).get()
 
-    # Verify completed state with M8 pipeline result
+    # Verify completed state with M9 pipeline result and observability columns
     res_completed = await client.get(f"{settings.API_V1_STR}/jobs/{job_id}", headers=headers)
     assert res_completed.status_code == 200
     comp_data = res_completed.json()
     assert comp_data["status"] == "complete"
     assert comp_data["result"]["processor"] == "clarityai-pipeline"
-    assert comp_data["result"]["version"] == "0.2.0"
+    assert comp_data["result"]["version"] == "0.3.0"
     assert comp_data["result"]["job_id"] == job_id
     assert comp_data["result"]["metadata"]["word_count"] == 10
     assert comp_data["result"]["metadata"]["line_count"] == 1
@@ -694,6 +730,16 @@ async def test_job_create_worker_process_and_retrieve_e2e(client, db, monkeypatc
     assert comp_data["result"]["ai_analysis"]["sentiment"] == "positive"
     assert len(comp_data["result"]["ai_analysis"]["action_items"]) == 2
     assert comp_data["completed_at"] is not None
+    assert comp_data["processing_started_at"] is not None
+    assert isinstance(comp_data["processing_duration_ms"], int)
+    assert comp_data["processing_duration_ms"] >= 0
+    assert comp_data["llm_provider"] == "fake"
+    assert comp_data["llm_model"] == "fake-model"
+    assert comp_data["llm_input_tokens"] == 100
+    assert comp_data["llm_output_tokens"] == 50
+    assert comp_data["llm_total_tokens"] == 150
+    assert comp_data["error_code"] is None
+
 
 
 

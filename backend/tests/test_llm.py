@@ -4,7 +4,7 @@ import pytest
 import pydantic
 import openai
 
-from app.llm.models import ActionItem, AIAnalysis
+from app.llm.models import ActionItem, AIAnalysis, LLMUsage, LLMResponse
 from app.llm.base import LLMProvider
 from app.llm.fake_provider import FakeLLMProvider
 from app.llm.openai_provider import OpenAIProvider
@@ -76,16 +76,72 @@ def test_ai_analysis_key_points_limit():
         )
 
 
+def test_llm_usage_non_negative_validation():
+    usage = LLMUsage(input_tokens=100, output_tokens=50, total_tokens=150)
+    assert usage.input_tokens == 100
+    assert usage.output_tokens == 50
+    assert usage.total_tokens == 150
+
+    # Negative tokens must be rejected
+    with pytest.raises(pydantic.ValidationError):
+        LLMUsage(input_tokens=-1, output_tokens=10, total_tokens=9)
+
+    with pytest.raises(pydantic.ValidationError):
+        LLMUsage(input_tokens=10, output_tokens=-5, total_tokens=5)
+
+    with pytest.raises(pydantic.ValidationError):
+        LLMUsage(input_tokens=10, output_tokens=10, total_tokens=-20)
+
+
+def test_llm_usage_preserves_provider_reported_asymmetric_values():
+    # Does not enforce total == input + output, preserving provider-reported values
+    usage = LLMUsage(input_tokens=100, output_tokens=50, total_tokens=160)
+    assert usage.input_tokens == 100
+    assert usage.output_tokens == 50
+    assert usage.total_tokens == 160
+
+
+def test_llm_response_model():
+    analysis = AIAnalysis(
+        summary="Summary",
+        key_points=["Point 1"],
+        action_items=[],
+        sentiment="neutral",
+    )
+    usage = LLMUsage(input_tokens=10, output_tokens=5, total_tokens=15)
+    response = LLMResponse(
+        analysis=analysis,
+        usage=usage,
+        provider="openai",
+        model="gpt-4o-mini",
+    )
+    assert response.analysis.summary == "Summary"
+    assert response.usage.total_tokens == 15
+    assert response.provider == "openai"
+    assert response.model == "gpt-4o-mini"
+
+
 # ==========================================
 # 2. FakeLLMProvider Tests
 # ==========================================
 
-def test_fake_llm_provider_deterministic_output():
+def test_fake_llm_provider_deterministic_output_and_call_count():
     provider = FakeLLMProvider()
+    assert provider.call_count == 0
+
     result = provider.analyze("Any random transcript content.")
-    assert isinstance(result, AIAnalysis)
-    assert len(result.key_points) >= 1
-    assert result.sentiment in ("positive", "neutral", "negative", "mixed")
+    assert provider.call_count == 1
+    assert isinstance(result, LLMResponse)
+    assert isinstance(result.analysis, AIAnalysis)
+    assert result.usage.input_tokens == 100
+    assert result.usage.output_tokens == 50
+    assert result.usage.total_tokens == 150
+    assert result.provider == "fake"
+    assert result.model == "fake-model"
+
+    # Second call increments count
+    provider.analyze("Second transcript.")
+    assert provider.call_count == 2
 
 
 # ==========================================
@@ -119,19 +175,30 @@ def test_openai_provider_successful_mocked_parse(monkeypatch):
     mock_choice.message.refusal = None
     mock_choice.message.parsed = mock_parsed_analysis
 
+    mock_usage = MagicMock()
+    mock_usage.prompt_tokens = 120
+    mock_usage.completion_tokens = 60
+    mock_usage.total_tokens = 180
+
     mock_completion = MagicMock()
     mock_completion.choices = [mock_choice]
+    mock_completion.usage = mock_usage
 
     mock_client = MagicMock()
     mock_client.beta.chat.completions.parse.return_value = mock_completion
 
-    provider = OpenAIProvider(api_key="sk-mock-valid-key")
+    provider = OpenAIProvider(api_key="sk-mock-valid-key", model="gpt-4o-mini")
     monkeypatch.setattr(provider, "_get_client", lambda: mock_client)
 
     result = provider.analyze("Executive leadership transcript.")
-    assert result == mock_parsed_analysis
-    assert result.summary == "Mocked executive summary of meeting."
-    assert result.sentiment == "positive"
+    assert isinstance(result, LLMResponse)
+    assert result.analysis == mock_parsed_analysis
+    assert result.analysis.summary == "Mocked executive summary of meeting."
+    assert result.usage.input_tokens == 120
+    assert result.usage.output_tokens == 60
+    assert result.usage.total_tokens == 180
+    assert result.provider == "openai"
+    assert result.model == "gpt-4o-mini"
 
 
 def test_openai_provider_authentication_error_mapping(monkeypatch):

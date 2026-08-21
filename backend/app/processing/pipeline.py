@@ -39,10 +39,13 @@ class ProcessingPipeline:
         metadata = current_context.metadata or TranscriptMetadata()
         return ProcessingResult(
             processor="clarityai-pipeline",
-            version="0.2.0",
+            version="0.3.0",
             job_id=current_context.job_id,
             metadata=metadata,
             ai_analysis=current_context.ai_analysis,
+            llm_usage=current_context.llm_usage,
+            llm_provider=current_context.llm_provider,
+            llm_model=current_context.llm_model,
         )
 
 

@@ -23,6 +23,13 @@ class JobResponse(BaseModel):
     retry_count: int = 0
     created_at: datetime
     completed_at: Optional[datetime] = None
+    processing_started_at: Optional[datetime] = None
+    processing_duration_ms: Optional[int] = None
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
+    llm_input_tokens: Optional[int] = None
+    llm_output_tokens: Optional[int] = None
+    llm_total_tokens: Optional[int] = None
+    error_code: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
-
