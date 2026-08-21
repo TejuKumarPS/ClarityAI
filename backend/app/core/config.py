@@ -1,7 +1,8 @@
 import json
 from typing import List, Union
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 
 class Settings(BaseSettings):
@@ -10,6 +11,10 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     DATABASE_URL: str = "postgresql+psycopg://postgres:postgres@localhost:5432/clarityai_dev"
+
+    JWT_SECRET_KEY: str
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
@@ -23,6 +28,23 @@ class Settings(BaseSettings):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
+    @model_validator(mode="after")
+    def validate_jwt_secret(self) -> "Settings":
+        if not self.JWT_SECRET_KEY or not self.JWT_SECRET_KEY.strip():
+            raise ValueError("JWT_SECRET_KEY must be configured and cannot be empty")
+        if self.ENVIRONMENT == "production":
+            insecure_defaults = {
+                "your-jwt-secret-key-min-32-chars",
+                "dev_insecure_jwt_secret_key_clarityai_development_only_2026",
+                "secret",
+                "changeme",
+            }
+            if self.JWT_SECRET_KEY in insecure_defaults or len(self.JWT_SECRET_KEY) < 32:
+                raise ValueError(
+                    "In production, JWT_SECRET_KEY must be an explicitly configured secret of at least 32 characters"
+                )
+        return self
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -32,3 +54,4 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+

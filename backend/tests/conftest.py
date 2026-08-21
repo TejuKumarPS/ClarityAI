@@ -5,6 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.main import app
 from app.models.base import Base
+from app.core.database import get_db
 
 TEST_DATABASE_URL = os.getenv(
     "TEST_DATABASE_URL",
@@ -42,7 +43,16 @@ def anyio_backend():
 
 
 @pytest.fixture
-async def client():
+async def client(db):
+    def override_get_db():
+        try:
+            yield db
+        finally:
+            pass
+
+    app.dependency_overrides[get_db] = override_get_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as test_client:
         yield test_client
+    app.dependency_overrides.clear()
+
