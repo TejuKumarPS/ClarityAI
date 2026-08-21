@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     API_V1_STR: str = "/api/v1"
     CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    DATABASE_URL: str = "postgresql+psycopg://postgres:postgres@localhost:5432/clarityai_dev"
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
