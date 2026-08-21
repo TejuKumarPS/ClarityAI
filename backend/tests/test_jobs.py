@@ -716,13 +716,13 @@ async def test_job_create_worker_process_and_retrieve_e2e(client, db, monkeypatc
     # Worker processes the job through M9 pipeline
     process_job.apply(args=[job_id]).get()
 
-    # Verify completed state with M11 pipeline result and observability columns
+    # Verify completed state with M12 pipeline result and observability columns
     res_completed = await client.get(f"{settings.API_V1_STR}/jobs/{job_id}", headers=headers)
     assert res_completed.status_code == 200
     comp_data = res_completed.json()
     assert comp_data["status"] == "complete"
     assert comp_data["result"]["processor"] == "clarityai-pipeline"
-    assert comp_data["result"]["version"] == "0.5.0"
+    assert comp_data["result"]["version"] == "0.6.0"
     assert comp_data["result"]["job_id"] == job_id
     assert comp_data["result"]["metadata"]["word_count"] == 10
     assert comp_data["result"]["metadata"]["line_count"] == 1
@@ -733,6 +733,10 @@ async def test_job_create_worker_process_and_retrieve_e2e(client, db, monkeypatc
     assert comp_data["result"]["ai_analysis"] is not None
     assert comp_data["result"]["ai_analysis"]["sentiment"] == "positive"
     assert len(comp_data["result"]["ai_analysis"]["action_items"]) == 2
+    assert len(comp_data["result"]["ai_analysis"]["decisions"]) >= 1
+    assert len(comp_data["result"]["ai_analysis"]["risks"]) >= 1
+    assert len(comp_data["result"]["ai_analysis"]["open_questions"]) >= 1
+
 
 
     assert comp_data["completed_at"] is not None

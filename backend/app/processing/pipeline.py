@@ -45,7 +45,7 @@ class ProcessingPipeline:
         metadata = current_context.metadata or TranscriptMetadata()
         return ProcessingResult(
             processor="clarityai-pipeline",
-            version="0.5.0",
+            version="0.6.0",
             job_id=current_context.job_id,
             metadata=metadata,
             chunking_metadata=current_context.chunking_metadata,
@@ -55,6 +55,7 @@ class ProcessingPipeline:
             llm_provider=current_context.llm_provider,
             llm_model=current_context.llm_model,
         )
+
 
 
 def create_default_pipeline(

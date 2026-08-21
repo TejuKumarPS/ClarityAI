@@ -28,7 +28,7 @@ class ProcessingContext(BaseModel):
 
 class ProcessingResult(BaseModel):
     processor: str = "clarityai-pipeline"
-    version: str = "0.5.0"
+    version: str = "0.6.0"
     job_id: str
     metadata: TranscriptMetadata
     chunking_metadata: ChunkingMetadata | None = None

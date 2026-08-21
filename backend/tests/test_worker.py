@@ -75,7 +75,7 @@ def test_process_job_successful_lifecycle(db, monkeypatch):
     updated_job = db.query(Job).filter(Job.id == job.id).first()
     assert updated_job.status == "complete"
     assert updated_job.result["processor"] == "clarityai-pipeline"
-    assert updated_job.result["version"] == "0.5.0"
+    assert updated_job.result["version"] == "0.6.0"
     assert updated_job.result["job_id"] == job_id_str
     assert updated_job.result["metadata"]["word_count"] == 6
 
@@ -94,7 +94,11 @@ def test_process_job_successful_lifecycle(db, monkeypatch):
     assert updated_job.result["ai_analysis"] is not None
     assert updated_job.result["ai_analysis"]["sentiment"] == "positive"
     assert len(updated_job.result["ai_analysis"]["action_items"]) == 2
+    assert len(updated_job.result["ai_analysis"]["decisions"]) >= 1
+    assert len(updated_job.result["ai_analysis"]["risks"]) >= 1
+    assert len(updated_job.result["ai_analysis"]["open_questions"]) >= 1
     assert fake_provider.call_count == 1
+
 
 
     # Observability columns verification

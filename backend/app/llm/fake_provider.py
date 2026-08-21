@@ -1,5 +1,13 @@
 from app.llm.base import LLMProvider
-from app.llm.models import AIAnalysis, ActionItem, LLMUsage, LLMResponse
+from app.llm.models import (
+    AIAnalysis,
+    Decision,
+    ActionItem,
+    Risk,
+    OpenQuestion,
+    LLMUsage,
+    LLMResponse,
+)
 
 
 class FakeLLMProvider(LLMProvider):
@@ -16,9 +24,27 @@ class FakeLLMProvider(LLMProvider):
                 "Infrastructure scalability goals approved for Q4.",
                 "Engineering team aligned on release timelines.",
             ],
+            decisions=[
+                Decision(
+                    decision="Migrate primary database to PostgreSQL 18",
+                    rationale="Enables high availability failover and improved query planner performance",
+                )
+            ],
             action_items=[
                 ActionItem(task="Deploy staging cluster", owner="Rahul"),
                 ActionItem(task="Review architecture documentation", owner=None),
+            ],
+            risks=[
+                Risk(
+                    description="Replication lag during initial cross-region database sync",
+                    severity="medium",
+                )
+            ],
+            open_questions=[
+                OpenQuestion(
+                    question="What is the rollback procedure if failover testing encounters timeout?",
+                    owner="David",
+                )
             ],
             sentiment="positive",
         )

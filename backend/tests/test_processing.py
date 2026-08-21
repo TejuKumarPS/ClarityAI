@@ -1,10 +1,18 @@
 import pytest
-from app.llm.models import ActionItem, AIAnalysis, LLMUsage
+from app.llm.models import (
+    ActionItem,
+    Decision,
+    Risk,
+    OpenQuestion,
+    AIAnalysis,
+    LLMUsage,
+)
 from app.llm.fake_provider import FakeLLMProvider
 from app.chunking.models import DocumentChunk, ChunkingMetadata
 from app.chunking.chunker import CharacterChunker
 from app.retrieval.models import RetrievedChunk, RetrievalMetadata
 from app.retrieval.lexical import KeywordRetriever
+from app.retrieval.context_builder import NO_CONTEXT_PLACEHOLDER
 from app.processing import (
     ProcessingContext,
     ProcessingResult,
@@ -51,7 +59,10 @@ def test_processing_result_serialization():
     analysis = AIAnalysis(
         summary="Short summary",
         key_points=["Point 1"],
+        decisions=[Decision(decision="Migrate to Postgres 18", rationale="HA")],
         action_items=[ActionItem(task="Task 1", owner="Alice")],
+        risks=[Risk(description="Failover lag", severity="low")],
+        open_questions=[OpenQuestion(question="Who leads testing?", owner="Bob")],
         sentiment="neutral",
     )
     usage = LLMUsage(input_tokens=100, output_tokens=50, total_tokens=150)
@@ -69,7 +80,7 @@ def test_processing_result_serialization():
     )
     result = ProcessingResult(
         processor="clarityai-pipeline",
-        version="0.5.0",
+        version="0.6.0",
         job_id="test-job-123",
         metadata=TranscriptMetadata(character_count=20, word_count=3, line_count=1),
         chunking_metadata=chunking_meta,
@@ -82,7 +93,7 @@ def test_processing_result_serialization():
     dumped = result.model_dump()
     assert dumped == {
         "processor": "clarityai-pipeline",
-        "version": "0.5.0",
+        "version": "0.6.0",
         "job_id": "test-job-123",
         "metadata": {
             "character_count": 20,
@@ -104,7 +115,10 @@ def test_processing_result_serialization():
         "ai_analysis": {
             "summary": "Short summary",
             "key_points": ["Point 1"],
+            "decisions": [{"decision": "Migrate to Postgres 18", "rationale": "HA"}],
             "action_items": [{"task": "Task 1", "owner": "Alice"}],
+            "risks": [{"description": "Failover lag", "severity": "low"}],
+            "open_questions": [{"question": "Who leads testing?", "owner": "Bob"}],
             "sentiment": "neutral",
         },
         "llm_usage": {
@@ -271,7 +285,6 @@ def test_ai_analysis_stage_execution_with_grounded_context():
         return orig_analyze(input_text)
 
     fake_provider.analyze = mock_analyze
-
     stage = AIAnalysisStage(provider=fake_provider)
     assert stage.name == "ai_analysis"
 
@@ -285,12 +298,40 @@ def test_ai_analysis_stage_execution_with_grounded_context():
     assert isinstance(updated.ai_analysis, AIAnalysis)
     assert updated.ai_analysis.sentiment == "positive"
     assert len(updated.ai_analysis.key_points) >= 1
+    assert len(updated.ai_analysis.decisions) >= 1
+    assert len(updated.ai_analysis.action_items) >= 1
+    assert len(updated.ai_analysis.risks) >= 1
+    assert len(updated.ai_analysis.open_questions) >= 1
     assert updated.llm_usage is not None
     assert updated.llm_usage.total_tokens == 150
     assert updated.llm_provider == "fake"
     assert updated.llm_model == "fake-model"
     # Grounded context passed to LLM
     assert received_inputs == ["[Chunk 0]\nRetrieved grounded chunk text."]
+
+
+def test_ai_analysis_stage_never_falls_back_to_transcript_when_grounded_context_set():
+    fake_provider = FakeLLMProvider()
+    received_inputs = []
+    orig_analyze = fake_provider.analyze
+
+    def mock_analyze(input_text):
+        received_inputs.append(input_text)
+        return orig_analyze(input_text)
+
+    fake_provider.analyze = mock_analyze
+    stage = AIAnalysisStage(provider=fake_provider)
+
+    context = ProcessingContext(
+        job_id="job-zero-retrieval",
+        transcript="CONFIDENTIAL_FULL_TRANSCRIPT_CONTENT_NEVER_SEND",
+        grounded_context=NO_CONTEXT_PLACEHOLDER,
+    )
+    stage.process(context)
+
+    assert len(received_inputs) == 1
+    assert received_inputs[0] == NO_CONTEXT_PLACEHOLDER
+    assert "CONFIDENTIAL" not in received_inputs[0]
 
 
 def test_ai_analysis_stage_none_transcript_raises():
@@ -327,7 +368,7 @@ def test_pipeline_ordered_execution_5_stages():
 
     result = pipeline.process(context)
     assert result.processor == "clarityai-pipeline"
-    assert result.version == "0.5.0"
+    assert result.version == "0.6.0"
     assert result.job_id == "pipeline-job-123"
     assert result.metadata.word_count == 12
     assert result.metadata.line_count == 2
@@ -337,6 +378,10 @@ def test_pipeline_ordered_execution_5_stages():
     assert result.retrieval_metadata.retrieved_count >= 1
     assert result.ai_analysis is not None
     assert result.ai_analysis.sentiment == "positive"
+    assert len(result.ai_analysis.decisions) >= 1
+    assert len(result.ai_analysis.action_items) >= 1
+    assert len(result.ai_analysis.risks) >= 1
+    assert len(result.ai_analysis.open_questions) >= 1
     assert result.llm_usage is not None
     assert result.llm_usage.total_tokens == 150
     # Exactly one LLM call despite multiple chunks and retrieval

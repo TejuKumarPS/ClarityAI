@@ -1,4 +1,13 @@
-from app.llm.models import ActionItem, AIAnalysis, SentimentType, LLMUsage, LLMResponse
+from app.llm.models import (
+    Decision,
+    ActionItem,
+    Risk,
+    OpenQuestion,
+    AIAnalysis,
+    SentimentType,
+    LLMUsage,
+    LLMResponse,
+)
 from app.llm.exceptions import (
     LLMError,
     LLMConfigurationError,
@@ -11,7 +20,10 @@ from app.llm.fake_provider import FakeLLMProvider
 from app.llm.openai_provider import OpenAIProvider
 
 __all__ = [
+    "Decision",
     "ActionItem",
+    "Risk",
+    "OpenQuestion",
     "AIAnalysis",
     "SentimentType",
     "LLMUsage",
