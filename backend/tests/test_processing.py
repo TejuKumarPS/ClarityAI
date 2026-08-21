@@ -3,6 +3,8 @@ from app.llm.models import ActionItem, AIAnalysis, LLMUsage
 from app.llm.fake_provider import FakeLLMProvider
 from app.chunking.models import DocumentChunk, ChunkingMetadata
 from app.chunking.chunker import CharacterChunker
+from app.retrieval.models import RetrievedChunk, RetrievalMetadata
+from app.retrieval.lexical import KeywordRetriever
 from app.processing import (
     ProcessingContext,
     ProcessingResult,
@@ -17,6 +19,7 @@ from app.processing import (
 from app.processing.stages.normalize import NormalizeStage
 from app.processing.stages.analyze import AnalyzeStage
 from app.processing.stages.chunk import ChunkStage
+from app.processing.stages.retrieve import RetrievalStage
 from app.processing.stages.ai_analysis import AIAnalysisStage
 
 
@@ -34,6 +37,10 @@ def test_processing_context_initialization():
     assert context.metadata is None
     assert context.chunks == []
     assert context.chunking_metadata is None
+    assert context.retrieval_query is None
+    assert context.retrieved_chunks == []
+    assert context.retrieval_metadata is None
+    assert context.grounded_context is None
     assert context.ai_analysis is None
     assert context.llm_usage is None
     assert context.llm_provider is None
@@ -54,12 +61,19 @@ def test_processing_result_serialization():
         chunk_size_chars=4000,
         chunk_overlap_chars=400,
     )
+    retrieval_meta = RetrievalMetadata(
+        query="project roadmap...",
+        retrieved_count=2,
+        retrieval_strategy="keyword",
+        max_results=5,
+    )
     result = ProcessingResult(
         processor="clarityai-pipeline",
-        version="0.4.0",
+        version="0.5.0",
         job_id="test-job-123",
         metadata=TranscriptMetadata(character_count=20, word_count=3, line_count=1),
         chunking_metadata=chunking_meta,
+        retrieval_metadata=retrieval_meta,
         ai_analysis=analysis,
         llm_usage=usage,
         llm_provider="openai",
@@ -68,7 +82,7 @@ def test_processing_result_serialization():
     dumped = result.model_dump()
     assert dumped == {
         "processor": "clarityai-pipeline",
-        "version": "0.4.0",
+        "version": "0.5.0",
         "job_id": "test-job-123",
         "metadata": {
             "character_count": 20,
@@ -80,6 +94,12 @@ def test_processing_result_serialization():
             "chunking_strategy": "character",
             "chunk_size_chars": 4000,
             "chunk_overlap_chars": 400,
+        },
+        "retrieval_metadata": {
+            "query": "project roadmap...",
+            "retrieved_count": 2,
+            "retrieval_strategy": "keyword",
+            "max_results": 5,
         },
         "ai_analysis": {
             "summary": "Short summary",
@@ -201,17 +221,64 @@ def test_chunk_stage_none_transcript_raises():
 
 
 # ==========================================
+# RetrievalStage Tests
+# ==========================================
+
+def test_retrieval_stage_execution():
+    retriever = KeywordRetriever()
+    stage = RetrievalStage(retriever=retriever, max_results=3)
+    assert stage.name == "retrieve"
+
+    chunks = [
+        DocumentChunk(index=0, text="Database indexing and optimization roadmap.", start_char=0, end_char=43),
+        DocumentChunk(index=1, text="Frontend UI design components in Figma.", start_char=43, end_char=82),
+    ]
+    context = ProcessingContext(
+        job_id="job-ret",
+        transcript="Database query optimization guidelines.",
+        chunks=chunks,
+    )
+
+    updated = stage.process(context)
+    assert len(updated.retrieved_chunks) == 1
+    assert updated.retrieved_chunks[0].chunk.index == 0
+    assert updated.retrieval_metadata is not None
+    assert updated.retrieval_metadata.retrieved_count == 1
+    assert updated.retrieval_metadata.retrieval_strategy == "keyword"
+    assert updated.retrieval_metadata.max_results == 3
+    assert "[Chunk 0]" in updated.grounded_context
+
+
+def test_retrieval_stage_none_transcript_raises():
+    stage = RetrievalStage()
+    context = ProcessingContext(job_id="job-ret-err", transcript="")
+    context.transcript = None  # type: ignore
+    with pytest.raises(InvalidProcessingContextError):
+        stage.process(context)
+
+
+# ==========================================
 # AIAnalysisStage Tests
 # ==========================================
 
-def test_ai_analysis_stage_execution():
+def test_ai_analysis_stage_execution_with_grounded_context():
     fake_provider = FakeLLMProvider()
+    received_inputs = []
+    orig_analyze = fake_provider.analyze
+
+    def mock_analyze(input_text):
+        received_inputs.append(input_text)
+        return orig_analyze(input_text)
+
+    fake_provider.analyze = mock_analyze
+
     stage = AIAnalysisStage(provider=fake_provider)
     assert stage.name == "ai_analysis"
 
     context = ProcessingContext(
         job_id="job-ai",
-        transcript="Leadership alignment on engineering roadmap.",
+        transcript="Original transcript text.",
+        grounded_context="[Chunk 0]\nRetrieved grounded chunk text.",
     )
     updated = stage.process(context)
     assert updated.ai_analysis is not None
@@ -222,7 +289,8 @@ def test_ai_analysis_stage_execution():
     assert updated.llm_usage.total_tokens == 150
     assert updated.llm_provider == "fake"
     assert updated.llm_model == "fake-model"
-    assert fake_provider.call_count == 1
+    # Grounded context passed to LLM
+    assert received_inputs == ["[Chunk 0]\nRetrieved grounded chunk text."]
 
 
 def test_ai_analysis_stage_none_transcript_raises():
@@ -238,14 +306,19 @@ def test_ai_analysis_stage_none_transcript_raises():
 # ProcessingPipeline Tests
 # ==========================================
 
-def test_pipeline_ordered_execution_4_stages():
+def test_pipeline_ordered_execution_5_stages():
     fake_provider = FakeLLMProvider()
     chunker = CharacterChunker(chunk_size=40, chunk_overlap=10)
-    pipeline = create_default_pipeline(llm_provider=fake_provider, chunker=chunker)
+    retriever = KeywordRetriever()
+    pipeline = create_default_pipeline(
+        llm_provider=fake_provider,
+        chunker=chunker,
+        retriever=retriever,
+    )
 
     # Verify stage ordering
     stage_names = [s.name for s in pipeline.stages]
-    assert stage_names == ["normalize", "analyze", "chunk", "ai_analysis"]
+    assert stage_names == ["normalize", "analyze", "chunk", "retrieve", "ai_analysis"]
 
     context = ProcessingContext(
         job_id="pipeline-job-123",
@@ -254,17 +327,19 @@ def test_pipeline_ordered_execution_4_stages():
 
     result = pipeline.process(context)
     assert result.processor == "clarityai-pipeline"
-    assert result.version == "0.4.0"
+    assert result.version == "0.5.0"
     assert result.job_id == "pipeline-job-123"
     assert result.metadata.word_count == 12
     assert result.metadata.line_count == 2
     assert result.chunking_metadata is not None
     assert result.chunking_metadata.chunk_count > 1
+    assert result.retrieval_metadata is not None
+    assert result.retrieval_metadata.retrieved_count >= 1
     assert result.ai_analysis is not None
     assert result.ai_analysis.sentiment == "positive"
     assert result.llm_usage is not None
     assert result.llm_usage.total_tokens == 150
-    # Exactly one LLM call despite multiple chunks
+    # Exactly one LLM call despite multiple chunks and retrieval
     assert fake_provider.call_count == 1
 
 
@@ -292,6 +367,7 @@ def test_pipeline_open_closed_stage_extensibility():
     assert result.ai_analysis is None
     assert result.llm_usage is None
     assert result.chunking_metadata is None
+    assert result.retrieval_metadata is None
 
 
 def test_pipeline_invalid_context_raises():

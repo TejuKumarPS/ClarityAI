@@ -75,7 +75,7 @@ def test_process_job_successful_lifecycle(db, monkeypatch):
     updated_job = db.query(Job).filter(Job.id == job.id).first()
     assert updated_job.status == "complete"
     assert updated_job.result["processor"] == "clarityai-pipeline"
-    assert updated_job.result["version"] == "0.4.0"
+    assert updated_job.result["version"] == "0.5.0"
     assert updated_job.result["job_id"] == job_id_str
     assert updated_job.result["metadata"]["word_count"] == 6
 
@@ -85,11 +85,17 @@ def test_process_job_successful_lifecycle(db, monkeypatch):
     assert updated_job.result["chunking_metadata"]["chunk_size_chars"] == 15
     assert updated_job.result["chunking_metadata"]["chunk_overlap_chars"] == 3
 
-    # AI analysis & single LLM call invariance (N chunks -> exactly 1 LLM call)
+    # Retrieval metadata verified
+    assert updated_job.result["retrieval_metadata"] is not None
+    assert updated_job.result["retrieval_metadata"]["retrieval_strategy"] == "keyword"
+    assert updated_job.result["retrieval_metadata"]["retrieved_count"] >= 1
+
+    # AI analysis & single LLM call invariance (N chunks + M retrieved -> exactly 1 LLM call)
     assert updated_job.result["ai_analysis"] is not None
     assert updated_job.result["ai_analysis"]["sentiment"] == "positive"
     assert len(updated_job.result["ai_analysis"]["action_items"]) == 2
     assert fake_provider.call_count == 1
+
 
     # Observability columns verification
     assert updated_job.processing_started_at is not None

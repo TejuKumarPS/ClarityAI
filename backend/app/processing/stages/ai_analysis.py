@@ -16,7 +16,14 @@ class AIAnalysisStage(ProcessingStage):
         if not context or context.transcript is None:
             raise InvalidProcessingContextError("Context and transcript must not be None")
 
-        response = self.provider.analyze(context.transcript)
+        # Grounded context invariant: use bounded retrieval context whenever set
+        input_text = (
+            context.grounded_context
+            if context.grounded_context is not None
+            else context.transcript
+        )
+
+        response = self.provider.analyze(input_text)
         context.ai_analysis = response.analysis
         context.llm_usage = response.usage
         context.llm_provider = response.provider

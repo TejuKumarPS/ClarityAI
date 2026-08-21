@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     CHUNK_SIZE_CHARS: int = 4000
     CHUNK_OVERLAP_CHARS: int = 400
 
+    MAX_RETRIEVAL_CONTEXT_CHARACTERS: int = 20_000
+    DEFAULT_MAX_RETRIEVAL_RESULTS: int = 5
+    MAX_RETRIEVAL_QUERY_CHARS: int = 100
+
+
 
 
 
@@ -67,8 +72,15 @@ class Settings(BaseSettings):
             raise ValueError("CHUNK_OVERLAP_CHARS must be greater than or equal to 0")
         if self.CHUNK_OVERLAP_CHARS >= self.CHUNK_SIZE_CHARS:
             raise ValueError("CHUNK_OVERLAP_CHARS must be less than CHUNK_SIZE_CHARS")
+        if self.MAX_RETRIEVAL_CONTEXT_CHARACTERS <= 0:
+            raise ValueError("MAX_RETRIEVAL_CONTEXT_CHARACTERS must be greater than 0")
+        if self.DEFAULT_MAX_RETRIEVAL_RESULTS <= 0:
+            raise ValueError("DEFAULT_MAX_RETRIEVAL_RESULTS must be greater than 0")
+        if self.MAX_RETRIEVAL_QUERY_CHARS <= 0:
+            raise ValueError("MAX_RETRIEVAL_QUERY_CHARS must be greater than 0")
 
         return self
+
 
 
     model_config = SettingsConfigDict(

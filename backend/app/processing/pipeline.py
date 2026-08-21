@@ -2,12 +2,15 @@ from app.llm.base import LLMProvider
 from app.llm.openai_provider import OpenAIProvider
 from app.chunking.base import DocumentChunker
 from app.chunking.chunker import CharacterChunker
+from app.retrieval.base import Retriever
+from app.retrieval.lexical import KeywordRetriever
 from app.processing.base import ProcessingStage
 from app.processing.models import ProcessingContext, ProcessingResult, TranscriptMetadata
 from app.processing.exceptions import ProcessingError, PipelineExecutionError, InvalidProcessingContextError
 from app.processing.stages.normalize import NormalizeStage
 from app.processing.stages.analyze import AnalyzeStage
 from app.processing.stages.chunk import ChunkStage
+from app.processing.stages.retrieve import RetrievalStage
 from app.processing.stages.ai_analysis import AIAnalysisStage
 
 
@@ -42,10 +45,11 @@ class ProcessingPipeline:
         metadata = current_context.metadata or TranscriptMetadata()
         return ProcessingResult(
             processor="clarityai-pipeline",
-            version="0.4.0",
+            version="0.5.0",
             job_id=current_context.job_id,
             metadata=metadata,
             chunking_metadata=current_context.chunking_metadata,
+            retrieval_metadata=current_context.retrieval_metadata,
             ai_analysis=current_context.ai_analysis,
             llm_usage=current_context.llm_usage,
             llm_provider=current_context.llm_provider,
@@ -56,14 +60,17 @@ class ProcessingPipeline:
 def create_default_pipeline(
     llm_provider: LLMProvider | None = None,
     chunker: DocumentChunker | None = None,
+    retriever: Retriever | None = None,
 ) -> ProcessingPipeline:
     provider = llm_provider if llm_provider is not None else OpenAIProvider()
     doc_chunker = chunker if chunker is not None else CharacterChunker()
+    doc_retriever = retriever if retriever is not None else KeywordRetriever()
     return ProcessingPipeline(
         stages=[
             NormalizeStage(),
             AnalyzeStage(),
             ChunkStage(chunker=doc_chunker),
+            RetrievalStage(retriever=doc_retriever),
             AIAnalysisStage(provider=provider),
         ]
     )
