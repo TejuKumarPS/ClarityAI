@@ -39,12 +39,3 @@ class InputHandlerFactory:
 
         return handler_cls()
 
-    @classmethod
-    def extract(
-        cls,
-        input_type: str,
-        content: Union[str, bytes],
-        filename: Optional[str] = None,
-    ) -> str:
-        handler = cls.get_handler(input_type)
-        return handler.extract_text(content, filename=filename)

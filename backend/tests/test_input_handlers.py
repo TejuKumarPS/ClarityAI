@@ -313,7 +313,9 @@ def test_factory_register_invalid_type_name():
         InputHandlerFactory.register_handler("", ValidSubclass)
 
 
-def test_factory_extract_helper():
+def test_factory_get_handler_and_extract():
     text = "Team retrospective transcript covering key achievements."
-    result = InputHandlerFactory.extract("text_paste", text)
+    handler = InputHandlerFactory.get_handler("text_paste")
+    result = handler.extract_text(text)
     assert result == text
+
