@@ -1,7 +1,8 @@
 import logging
+import math
 import uuid
 from typing import Optional, Any
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from sqlalchemy.orm import Session
 
@@ -19,11 +20,12 @@ from app.input_handlers.exceptions import (
 )
 from app.models.user import User
 from app.models.job import Job
-from app.schemas.job import JobResponse
+from app.schemas.job import JobResponse, JobListResponse
 from app.worker.tasks import process_job
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
 
 
 
@@ -183,6 +185,40 @@ async def create_job(
 
 
 @router.get(
+    "",
+    response_model=JobListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve paginated history of jobs for the authenticated user",
+)
+async def list_jobs(
+    page: int = Query(default=1, ge=1, description="Page number (>= 1)"),
+    page_size: int = Query(default=20, ge=1, le=100, description="Page size (1-100)"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    total = db.query(Job).filter(Job.user_id == current_user.id).count()
+    pages = math.ceil(total / page_size) if total > 0 else 0
+    offset = (page - 1) * page_size
+
+    jobs = (
+        db.query(Job)
+        .filter(Job.user_id == current_user.id)
+        .order_by(Job.created_at.desc(), Job.id.desc())
+        .offset(offset)
+        .limit(page_size)
+        .all()
+    )
+
+    return JobListResponse(
+        items=jobs,
+        page=page,
+        page_size=page_size,
+        total=total,
+        pages=pages,
+    )
+
+
+@router.get(
     "/{job_id}",
     response_model=JobResponse,
     status_code=status.HTTP_200_OK,
@@ -209,5 +245,6 @@ async def get_job(
         )
 
     return job
+
 
 

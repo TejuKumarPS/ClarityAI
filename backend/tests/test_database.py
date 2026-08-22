@@ -205,3 +205,16 @@ def test_job_observability_fields_defaults_and_population(db):
     assert job.error_code is None
 
 
+def test_jobs_user_id_created_at_id_composite_index(db):
+    from sqlalchemy import inspect
+
+    inspector = inspect(db.bind)
+    indexes = inspector.get_indexes("jobs")
+    index_names = {idx["name"] for idx in indexes}
+    assert "ix_jobs_user_id_created_at_id" in index_names
+
+    composite_idx = next(idx for idx in indexes if idx["name"] == "ix_jobs_user_id_created_at_id")
+    assert composite_idx["column_names"] == ["user_id", "created_at", "id"]
+
+
+

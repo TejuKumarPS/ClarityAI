@@ -797,6 +797,372 @@ async def test_job_failed_worker_retrieval_and_safe_error_exposure(client, db, m
     assert transcript not in str(data)
 
 
+# ==========================================
+# Milestone 15: Paginated Job History Tests
+# ==========================================
+
+@pytest.mark.anyio
+async def test_list_jobs_unauthenticated(client):
+    response = await client.get(f"{settings.API_V1_STR}/jobs")
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Could not validate credentials"
+
+
+@pytest.mark.anyio
+async def test_list_jobs_invalid_token(client):
+    headers = {"Authorization": "Bearer invalid.jwt.token"}
+    response = await client.get(f"{settings.API_V1_STR}/jobs", headers=headers)
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Could not validate credentials"
+
+
+@pytest.mark.anyio
+async def test_list_jobs_expired_token(client):
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(uuid.uuid4()),
+        "iat": int((now - timedelta(hours=2)).timestamp()),
+        "exp": int((now - timedelta(hours=1)).timestamp()),
+    }
+    expired_token = jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+    headers = {"Authorization": f"Bearer {expired_token}"}
+    response = await client.get(f"{settings.API_V1_STR}/jobs", headers=headers)
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_list_jobs_empty_history(client):
+    token = await register_and_get_token(client, email="empty_history@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["items"] == []
+    assert data["page"] == 1
+    assert data["page_size"] == 20
+    assert data["total"] == 0
+    assert data["pages"] == 0
+
+
+@pytest.mark.anyio
+async def test_list_jobs_single_job(client, db):
+    token = await register_and_get_token(client, email="single_job@example.com")
+    user = db.query(User).filter(User.email == "single_job@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    job = Job(
+        user_id=user.id,
+        input_type="text_paste",
+        raw_transcript="Single job test transcript.",
+        status="pending",
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert data["pages"] == 1
+    assert len(data["items"]) == 1
+    item = data["items"][0]
+    assert item["id"] == str(job.id)
+    assert item["status"] == "pending"
+    assert item["input_type"] == "text_paste"
+
+
+@pytest.mark.anyio
+async def test_list_jobs_multiple_jobs_all_returned_with_large_page_size(client, db):
+    token = await register_and_get_token(client, email="multi_job@example.com")
+    user = db.query(User).filter(User.email == "multi_job@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    for i in range(5):
+        db.add(
+            Job(
+                user_id=user.id,
+                input_type="text_paste",
+                raw_transcript=f"Transcript number {i}",
+                status="pending",
+            )
+        )
+    db.commit()
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs?page=1&page_size=50", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 5
+    assert data["pages"] == 1
+    assert len(data["items"]) == 5
+
+
+@pytest.mark.anyio
+async def test_list_jobs_pagination_25_jobs(client, db):
+    token = await register_and_get_token(client, email="paginated_25@example.com")
+    user = db.query(User).filter(User.email == "paginated_25@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    base_time = datetime.now(timezone.utc)
+    for i in range(25):
+        db.add(
+            Job(
+                user_id=user.id,
+                input_type="text_paste",
+                raw_transcript=f"Batch transcript {i}",
+                status="pending",
+                created_at=base_time + timedelta(seconds=i),
+            )
+        )
+    db.commit()
+
+    # Page 1
+    res1 = await client.get(f"{settings.API_V1_STR}/jobs?page=1&page_size=10", headers=headers)
+    assert res1.status_code == 200
+    data1 = res1.json()
+    assert data1["page"] == 1
+    assert data1["page_size"] == 10
+    assert data1["total"] == 25
+    assert data1["pages"] == 3
+    assert len(data1["items"]) == 10
+    ids_p1 = [item["id"] for item in data1["items"]]
+
+    # Page 2
+    res2 = await client.get(f"{settings.API_V1_STR}/jobs?page=2&page_size=10", headers=headers)
+    assert res2.status_code == 200
+    data2 = res2.json()
+    assert data2["page"] == 2
+    assert data2["page_size"] == 10
+    assert data2["total"] == 25
+    assert data2["pages"] == 3
+    assert len(data2["items"]) == 10
+    ids_p2 = [item["id"] for item in data2["items"]]
+
+    # Page 3
+    res3 = await client.get(f"{settings.API_V1_STR}/jobs?page=3&page_size=10", headers=headers)
+    assert res3.status_code == 200
+    data3 = res3.json()
+    assert data3["page"] == 3
+    assert data3["page_size"] == 10
+    assert data3["total"] == 25
+    assert data3["pages"] == 3
+    assert len(data3["items"]) == 5
+    ids_p3 = [item["id"] for item in data3["items"]]
+
+    # No duplicates across pages and all 25 accounted for
+    all_ids = ids_p1 + ids_p2 + ids_p3
+    assert len(all_ids) == 25
+    assert len(set(all_ids)) == 25
+
+
+@pytest.mark.anyio
+async def test_list_jobs_deterministic_ordering(client, db):
+    token = await register_and_get_token(client, email="ordering_test@example.com")
+    user = db.query(User).filter(User.email == "ordering_test@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    t0 = datetime(2026, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+    t1 = datetime(2026, 1, 1, 11, 0, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    # Insert out of order
+    j_mid = Job(user_id=user.id, input_type="text_paste", raw_transcript="mid", created_at=t1)
+    j_old = Job(user_id=user.id, input_type="text_paste", raw_transcript="old", created_at=t0)
+    j_new = Job(user_id=user.id, input_type="text_paste", raw_transcript="new", created_at=t2)
+    db.add_all([j_mid, j_old, j_new])
+    db.commit()
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs?page=1&page_size=10", headers=headers)
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 3
+    assert items[0]["id"] == str(j_new.id)
+    assert items[1]["id"] == str(j_mid.id)
+    assert items[2]["id"] == str(j_old.id)
+
+
+@pytest.mark.anyio
+async def test_list_jobs_tie_breaker_ordering_by_id_desc(client, db):
+    token = await register_and_get_token(client, email="tiebreak_test@example.com")
+    user = db.query(User).filter(User.email == "tiebreak_test@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    fixed_time = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    id_smaller = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    id_larger = uuid.UUID("99999999-9999-9999-9999-999999999999")
+
+    j1 = Job(id=id_smaller, user_id=user.id, input_type="text_paste", raw_transcript="first", created_at=fixed_time)
+    j2 = Job(id=id_larger, user_id=user.id, input_type="text_paste", raw_transcript="second", created_at=fixed_time)
+    db.add_all([j1, j2])
+    db.commit()
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs?page=1&page_size=10", headers=headers)
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 2
+    # Secondary tiebreaker id DESC puts id_larger first
+    assert items[0]["id"] == str(id_larger)
+    assert items[1]["id"] == str(id_smaller)
+
+
+@pytest.mark.anyio
+async def test_list_jobs_page_beyond_last_page(client, db):
+    token = await register_and_get_token(client, email="beyond_page@example.com")
+    user = db.query(User).filter(User.email == "beyond_page@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    for i in range(3):
+        db.add(Job(user_id=user.id, input_type="text_paste", raw_transcript=f"Job {i}"))
+    db.commit()
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs?page=10&page_size=10", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["items"] == []
+    assert data["page"] == 10
+    assert data["page_size"] == 10
+    assert data["total"] == 3
+    assert data["pages"] == 1
+
+
+@pytest.mark.parametrize(
+    "invalid_query",
+    [
+        "page=0",
+        "page=-1",
+        "page_size=0",
+        "page_size=-1",
+        "page_size=101",
+        "page=0&page_size=0",
+        "page=-5&page_size=150",
+    ],
+)
+@pytest.mark.anyio
+async def test_list_jobs_query_validation_422(client, invalid_query):
+    token = await register_and_get_token(client, email="val_query@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs?{invalid_query}", headers=headers)
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_list_jobs_ownership_isolation(client, db):
+    token_a = await register_and_get_token(client, email="user_a@example.com")
+    token_b = await register_and_get_token(client, email="user_b@example.com")
+
+    user_a = db.query(User).filter(User.email == "user_a@example.com").first()
+    user_b = db.query(User).filter(User.email == "user_b@example.com").first()
+
+    job_a1 = Job(user_id=user_a.id, input_type="text_paste", raw_transcript="User A transcript 1")
+    job_a2 = Job(user_id=user_a.id, input_type="text_paste", raw_transcript="User A transcript 2")
+    job_b1 = Job(user_id=user_b.id, input_type="text_paste", raw_transcript="User B transcript 1")
+
+    db.add_all([job_a1, job_a2, job_b1])
+    db.commit()
+
+    # User A check
+    res_a = await client.get(f"{settings.API_V1_STR}/jobs", headers={"Authorization": f"Bearer {token_a}"})
+    assert res_a.status_code == 200
+    data_a = res_a.json()
+    assert data_a["total"] == 2
+    ids_a = {item["id"] for item in data_a["items"]}
+    assert ids_a == {str(job_a1.id), str(job_a2.id)}
+    assert str(job_b1.id) not in ids_a
+
+    # User B check
+    res_b = await client.get(f"{settings.API_V1_STR}/jobs", headers={"Authorization": f"Bearer {token_b}"})
+    assert res_b.status_code == 200
+    data_b = res_b.json()
+    assert data_b["total"] == 1
+    ids_b = {item["id"] for item in data_b["items"]}
+    assert ids_b == {str(job_b1.id)}
+    assert str(job_a1.id) not in ids_b
+    assert str(job_a2.id) not in ids_b
+
+
+@pytest.mark.anyio
+async def test_list_jobs_privacy_no_raw_transcript_or_passwords(client, db):
+    token = await register_and_get_token(client, email="privacy_list@example.com")
+    user = db.query(User).filter(User.email == "privacy_list@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    secret_raw_text = "CONFIDENTIAL_TOP_SECRET_TRANSCRIPT_12345"
+    job = Job(
+        user_id=user.id,
+        input_type="text_paste",
+        raw_transcript=secret_raw_text,
+        status="complete",
+        result={"processor": "clarityai-pipeline", "version": "0.6.0"},
+    )
+    db.add(job)
+    db.commit()
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["items"]) == 1
+    item = data["items"][0]
+    assert "raw_transcript" not in item
+    assert "password_hash" not in item
+    assert secret_raw_text not in str(data)
+
+
+@pytest.mark.anyio
+async def test_list_jobs_result_serialization_integrity(client, db):
+    token = await register_and_get_token(client, email="serialization_list@example.com")
+    user = db.query(User).filter(User.email == "serialization_list@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    intelligence_result = {
+        "processor": "clarityai-pipeline",
+        "version": "0.6.0",
+        "job_id": "test-job-id",
+        "metadata": {"character_count": 100, "word_count": 20, "line_count": 2},
+        "chunking_metadata": {"chunk_count": 1, "chunk_size_chars": 4000, "chunk_overlap_chars": 400},
+        "retrieval_metadata": {"retrieval_strategy": "keyword", "retrieved_count": 1, "query": "meeting"},
+        "ai_analysis": {
+            "summary": "Sprint summary",
+            "key_points": ["Point 1"],
+            "decisions": [{"decision": "Migrate DB", "rationale": "HA"}],
+            "action_items": [{"task": "Deploy", "owner": "Alice"}],
+            "risks": [{"description": "Lag", "severity": "low"}],
+            "open_questions": [{"question": "Rollout time?", "owner": None}],
+            "sentiment": "positive",
+        },
+        "llm_usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
+        "llm_provider": "fake",
+        "llm_model": "fake-model",
+    }
+
+    job = Job(
+        user_id=user.id,
+        input_type="text_paste",
+        raw_transcript="Meeting text",
+        status="complete",
+        result=intelligence_result,
+        llm_provider="fake",
+        llm_model="fake-model",
+        llm_input_tokens=100,
+        llm_output_tokens=50,
+        llm_total_tokens=150,
+    )
+    db.add(job)
+    db.commit()
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    item = data["items"][0]
+    assert item["result"]["processor"] == "clarityai-pipeline"
+    assert item["result"]["version"] == "0.6.0"
+    assert item["result"]["ai_analysis"]["sentiment"] == "positive"
+    assert item["llm_provider"] == "fake"
+    assert item["llm_total_tokens"] == 150
+
+
+
 
 
 
