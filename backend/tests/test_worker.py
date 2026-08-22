@@ -9,7 +9,12 @@ from app.core.config import settings
 from app.models.job import Job
 from app.models.user import User
 from app.llm.fake_provider import FakeLLMProvider
-from app.llm.exceptions import LLMInputTooLargeError
+from app.llm.exceptions import (
+    LLMConfigurationError,
+    LLMInputTooLargeError,
+    LLMResponseValidationError,
+    LLMProviderError,
+)
 from app.chunking.chunker import CharacterChunker
 from app.processing import (
     ProcessingStage,
@@ -98,8 +103,6 @@ def test_process_job_successful_lifecycle(db, monkeypatch):
     assert len(updated_job.result["ai_analysis"]["risks"]) >= 1
     assert len(updated_job.result["ai_analysis"]["open_questions"]) >= 1
     assert fake_provider.call_count == 1
-
-
 
     # Observability columns verification
     assert updated_job.processing_started_at is not None
@@ -205,7 +208,7 @@ def test_process_job_transient_failure_and_retry(db, monkeypatch):
         def process(self, context: ProcessingContext) -> ProcessingContext:
             attempts["count"] += 1
             if attempts["count"] == 1:
-                raise ConnectionError("Temporary connection timeout")
+                raise LLMProviderError("Temporary connection timeout")
             return context
 
     flaky_pipeline = ProcessingPipeline(stages=[FlakyStage()])
@@ -265,7 +268,7 @@ def test_process_job_permanent_failure_exhausted_retries(db, monkeypatch):
             return "broken"
 
         def process(self, context: ProcessingContext) -> ProcessingContext:
-            raise ProcessingError("Unrecoverable internal failure")
+            raise LLMProviderError("Persistent rate limit error")
 
     broken_pipeline = ProcessingPipeline(stages=[BrokenStage()])
     monkeypatch.setattr(tasks_module, "_pipeline_override", broken_pipeline)
@@ -277,11 +280,11 @@ def test_process_job_permanent_failure_exhausted_retries(db, monkeypatch):
     db.expire_all()
     failed_job = db.query(Job).filter(Job.id == job.id).first()
     assert failed_job.status == "failed"
-    assert failed_job.error_code == "PROCESSING_ERROR"
+    assert failed_job.error_code == "LLM_PROVIDER_ERROR"
     assert failed_job.result == {
         "error": {
-            "code": "PROCESSING_ERROR",
-            "message": "An unexpected error occurred during job processing",
+            "code": "LLM_PROVIDER_ERROR",
+            "message": "LLM provider temporarily unavailable or encountered a transient error",
         }
     }
     assert failed_job.retry_count == settings.CELERY_TASK_MAX_RETRIES
@@ -289,9 +292,55 @@ def test_process_job_permanent_failure_exhausted_retries(db, monkeypatch):
     assert failed_job.processing_duration_ms >= 0
 
 
-def test_process_job_non_retryable_error_fails_immediately(db, monkeypatch):
+def test_process_job_llm_configuration_error_non_retryable(db, monkeypatch):
     user = User(
-        email=f"nonretry_user_{uuid.uuid4().hex[:6]}@example.com",
+        email=f"llm_config_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash="mockhash",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    job = Job(
+        user_id=user.id,
+        input_type="text_paste",
+        raw_transcript="Missing API key scenario.",
+        status="pending",
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    class UnconfiguredLLMStage(ProcessingStage):
+        @property
+        def name(self) -> str:
+            return "unconfigured_llm"
+
+        def process(self, context: ProcessingContext) -> ProcessingContext:
+            raise LLMConfigurationError("OPENAI_API_KEY is not configured")
+
+    pipeline = ProcessingPipeline(stages=[UnconfiguredLLMStage()])
+    monkeypatch.setattr(tasks_module, "_pipeline_override", pipeline)
+
+    with pytest.raises(LLMConfigurationError):
+        process_job.apply(args=[str(job.id)], throw=True)
+
+    db.expire_all()
+    failed_job = db.query(Job).filter(Job.id == job.id).first()
+    assert failed_job.status == "failed"
+    assert failed_job.error_code == "LLM_CONFIGURATION_ERROR"
+    assert failed_job.result == {
+        "error": {
+            "code": "LLM_CONFIGURATION_ERROR",
+            "message": "LLM service is improperly configured",
+        }
+    }
+    assert failed_job.retry_count == 0
+
+
+def test_process_job_llm_input_too_large_non_retryable(db, monkeypatch):
+    user = User(
+        email=f"llm_large_{uuid.uuid4().hex[:6]}@example.com",
         password_hash="mockhash",
     )
     db.add(user)
@@ -332,9 +381,53 @@ def test_process_job_non_retryable_error_fails_immediately(db, monkeypatch):
             "message": "Transcript exceeds maximum allowed input size",
         }
     }
-    assert failed_job.retry_count == 0  # Not retried
-    assert isinstance(failed_job.processing_duration_ms, int)
-    assert failed_job.processing_duration_ms >= 0
+    assert failed_job.retry_count == 0
+
+
+def test_process_job_llm_response_validation_error_non_retryable(db, monkeypatch):
+    user = User(
+        email=f"llm_val_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash="mockhash",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    job = Job(
+        user_id=user.id,
+        input_type="text_paste",
+        raw_transcript="Malformed structured output.",
+        status="pending",
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    class MalformedResponseStage(ProcessingStage):
+        @property
+        def name(self) -> str:
+            return "malformed_response"
+
+        def process(self, context: ProcessingContext) -> ProcessingContext:
+            raise LLMResponseValidationError("Model output failed Pydantic schema validation")
+
+    pipeline = ProcessingPipeline(stages=[MalformedResponseStage()])
+    monkeypatch.setattr(tasks_module, "_pipeline_override", pipeline)
+
+    with pytest.raises(LLMResponseValidationError):
+        process_job.apply(args=[str(job.id)], throw=True)
+
+    db.expire_all()
+    failed_job = db.query(Job).filter(Job.id == job.id).first()
+    assert failed_job.status == "failed"
+    assert failed_job.error_code == "LLM_RESPONSE_INVALID"
+    assert failed_job.result == {
+        "error": {
+            "code": "LLM_RESPONSE_INVALID",
+            "message": "LLM provider returned an invalid structured response",
+        }
+    }
+    assert failed_job.retry_count == 0
 
 
 def test_process_job_nonexistent_job_id():

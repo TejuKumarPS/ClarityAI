@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-4o-mini"
     MAX_LLM_INPUT_CHARACTERS: int = 100_000
 
+    LLM_ENABLED: bool = True
+    LLM_REQUEST_TIMEOUT_SECONDS: float = 60.0
+    LLM_MAX_RETRY_ATTEMPTS: int = 3
+
     CHUNK_SIZE_CHARS: int = 4000
     CHUNK_OVERLAP_CHARS: int = 400
 
@@ -66,6 +70,12 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "In production, JWT_SECRET_KEY must be an explicitly configured secret of at least 32 characters"
                 )
+        if self.MAX_LLM_INPUT_CHARACTERS <= 0:
+            raise ValueError("MAX_LLM_INPUT_CHARACTERS must be greater than 0")
+        if self.LLM_REQUEST_TIMEOUT_SECONDS <= 0:
+            raise ValueError("LLM_REQUEST_TIMEOUT_SECONDS must be greater than 0")
+        if self.LLM_MAX_RETRY_ATTEMPTS < 0:
+            raise ValueError("LLM_MAX_RETRY_ATTEMPTS must be greater than or equal to 0")
         if self.CHUNK_SIZE_CHARS <= 0:
             raise ValueError("CHUNK_SIZE_CHARS must be greater than 0")
         if self.CHUNK_OVERLAP_CHARS < 0:

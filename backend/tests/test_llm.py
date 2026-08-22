@@ -4,6 +4,7 @@ import pytest
 import pydantic
 import openai
 
+from app.core.config import Settings
 from app.llm.models import (
     Decision,
     ActionItem,
@@ -211,7 +212,37 @@ def test_llm_response_model():
 
 
 # ==========================================
-# 2. FakeLLMProvider Tests
+# 2. Configuration Settings Validation Tests
+# ==========================================
+
+def test_settings_valid_llm_defaults():
+    s = Settings(JWT_SECRET_KEY="test_secret_key_long_enough_for_dev")
+    assert s.LLM_ENABLED is True
+    assert s.LLM_REQUEST_TIMEOUT_SECONDS == 60.0
+    assert s.LLM_MAX_RETRY_ATTEMPTS == 3
+    assert s.MAX_LLM_INPUT_CHARACTERS == 100_000
+
+
+def test_settings_invalid_timeout_raises():
+    with pytest.raises(ValueError, match="LLM_REQUEST_TIMEOUT_SECONDS"):
+        Settings(JWT_SECRET_KEY="test_secret_key_long_enough_for_dev", LLM_REQUEST_TIMEOUT_SECONDS=0)
+
+    with pytest.raises(ValueError, match="LLM_REQUEST_TIMEOUT_SECONDS"):
+        Settings(JWT_SECRET_KEY="test_secret_key_long_enough_for_dev", LLM_REQUEST_TIMEOUT_SECONDS=-5.0)
+
+
+def test_settings_invalid_retry_attempts_raises():
+    with pytest.raises(ValueError, match="LLM_MAX_RETRY_ATTEMPTS"):
+        Settings(JWT_SECRET_KEY="test_secret_key_long_enough_for_dev", LLM_MAX_RETRY_ATTEMPTS=-1)
+
+
+def test_settings_invalid_max_input_characters_raises():
+    with pytest.raises(ValueError, match="MAX_LLM_INPUT_CHARACTERS"):
+        Settings(JWT_SECRET_KEY="test_secret_key_long_enough_for_dev", MAX_LLM_INPUT_CHARACTERS=0)
+
+
+# ==========================================
+# 3. FakeLLMProvider Tests
 # ==========================================
 
 def test_fake_llm_provider_deterministic_output_and_call_count():
@@ -240,7 +271,7 @@ def test_fake_llm_provider_deterministic_output_and_call_count():
 
 
 # ==========================================
-# 3. OpenAIProvider Mocked Tests (No Network)
+# 4. OpenAIProvider Mocked Tests (No Network)
 # ==========================================
 
 def test_openai_provider_missing_api_key_raises():
@@ -250,12 +281,45 @@ def test_openai_provider_missing_api_key_raises():
     assert "OPENAI_API_KEY is not configured" in str(exc_info.value)
 
 
+def test_openai_provider_blank_whitespace_api_key_raises():
+    provider = OpenAIProvider(api_key="   ")
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        provider.analyze("Some transcript")
+    assert "OPENAI_API_KEY is not configured" in str(exc_info.value)
+
+
+def test_openai_provider_disabled_raises():
+    provider = OpenAIProvider(api_key="sk-valid-key", llm_enabled=False)
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        provider.analyze("Some transcript")
+    assert "disabled by configuration" in str(exc_info.value)
+
+
 def test_openai_provider_input_too_large_raises():
     provider = OpenAIProvider(api_key="sk-mock", max_input_chars=50)
     oversized_text = "A" * 100
     with pytest.raises(LLMInputTooLargeError) as exc_info:
         provider.analyze(oversized_text)
     assert "exceeds limit" in str(exc_info.value)
+
+
+def test_openai_provider_client_configuration_propagation(monkeypatch):
+    mock_openai_class = MagicMock()
+    monkeypatch.setattr(openai, "OpenAI", mock_openai_class)
+
+    provider = OpenAIProvider(
+        api_key="sk-secret-key-12345",
+        model="gpt-4o-mini",
+        timeout=45.0,
+        max_retries=2,
+    )
+    client = provider._get_client()
+    assert client is not None
+    mock_openai_class.assert_called_once_with(
+        api_key="sk-secret-key-12345",
+        timeout=45.0,
+        max_retries=2,
+    )
 
 
 def test_openai_provider_successful_mocked_parse(monkeypatch):
@@ -293,7 +357,8 @@ def test_openai_provider_successful_mocked_parse(monkeypatch):
     mock_client = MagicMock()
     mock_client.beta.chat.completions.parse.return_value = mock_completion
 
-    provider = OpenAIProvider(api_key="sk-mock-valid-key", model="gpt-4o-mini")
+    secret_key = "sk-super-secret-key-do-not-leak"
+    provider = OpenAIProvider(api_key=secret_key, model="gpt-4o-mini")
     monkeypatch.setattr(provider, "_get_client", lambda: mock_client)
 
     result = provider.analyze("Executive leadership transcript.")
@@ -317,20 +382,39 @@ def test_openai_provider_successful_mocked_parse(monkeypatch):
     assert result.model == "gpt-4o-mini"
 
 
-def test_openai_provider_authentication_error_mapping(monkeypatch):
+def test_openai_provider_authentication_error_mapping_and_no_secret_leak(monkeypatch):
+    secret_key = "sk-live-secret-key-abcdef123456"
     mock_client = MagicMock()
     mock_client.beta.chat.completions.parse.side_effect = openai.AuthenticationError(
-        "Incorrect API key",
+        "Incorrect API key provided: sk-live-***456",
         response=MagicMock(status_code=401),
         body=None,
     )
 
-    provider = OpenAIProvider(api_key="sk-mock-bad-key")
+    provider = OpenAIProvider(api_key=secret_key)
     monkeypatch.setattr(provider, "_get_client", lambda: mock_client)
 
     with pytest.raises(LLMConfigurationError) as exc_info:
         provider.analyze("Transcript text")
     assert "authentication failed" in str(exc_info.value).lower()
+    # Confirm raw secret key is never leaked
+    assert secret_key not in str(exc_info.value)
+
+
+def test_openai_provider_permission_denied_error_mapping(monkeypatch):
+    mock_client = MagicMock()
+    mock_client.beta.chat.completions.parse.side_effect = openai.PermissionDeniedError(
+        "Missing project access",
+        response=MagicMock(status_code=403),
+        body=None,
+    )
+
+    provider = OpenAIProvider(api_key="sk-mock")
+    monkeypatch.setattr(provider, "_get_client", lambda: mock_client)
+
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        provider.analyze("Transcript text")
+    assert "permission denied" in str(exc_info.value).lower()
 
 
 def test_openai_provider_timeout_error_mapping(monkeypatch):
@@ -347,6 +431,20 @@ def test_openai_provider_timeout_error_mapping(monkeypatch):
     assert "timeout" in str(exc_info.value).lower()
 
 
+def test_openai_provider_connection_error_mapping(monkeypatch):
+    mock_client = MagicMock()
+    mock_client.beta.chat.completions.parse.side_effect = openai.APIConnectionError(
+        request=MagicMock()
+    )
+
+    provider = OpenAIProvider(api_key="sk-mock")
+    monkeypatch.setattr(provider, "_get_client", lambda: mock_client)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        provider.analyze("Transcript text")
+    assert "network" in str(exc_info.value).lower() or "timeout" in str(exc_info.value).lower()
+
+
 def test_openai_provider_rate_limit_error_mapping(monkeypatch):
     mock_client = MagicMock()
     mock_client.beta.chat.completions.parse.side_effect = openai.RateLimitError(
@@ -361,6 +459,71 @@ def test_openai_provider_rate_limit_error_mapping(monkeypatch):
     with pytest.raises(LLMProviderError) as exc_info:
         provider.analyze("Transcript text")
     assert "rate limit" in str(exc_info.value).lower()
+
+
+def test_openai_provider_internal_server_error_mapping(monkeypatch):
+    mock_client = MagicMock()
+    mock_client.beta.chat.completions.parse.side_effect = openai.InternalServerError(
+        "Internal server error",
+        response=MagicMock(status_code=500),
+        body=None,
+    )
+
+    provider = OpenAIProvider(api_key="sk-mock")
+    monkeypatch.setattr(provider, "_get_client", lambda: mock_client)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        provider.analyze("Transcript text")
+    assert "server error" in str(exc_info.value).lower()
+
+
+def test_openai_provider_token_length_finish_reason_raises(monkeypatch):
+    mock_client = MagicMock()
+    mock_client.beta.chat.completions.parse.side_effect = openai.LengthFinishReasonError(
+        completion=MagicMock()
+    )
+
+    provider = OpenAIProvider(api_key="sk-mock")
+    monkeypatch.setattr(provider, "_get_client", lambda: mock_client)
+
+    with pytest.raises(LLMResponseValidationError) as exc_info:
+        provider.analyze("Transcript text")
+    assert "token" in str(exc_info.value).lower()
+
+
+def test_openai_provider_bad_request_raises(monkeypatch):
+    mock_client = MagicMock()
+    mock_client.beta.chat.completions.parse.side_effect = openai.BadRequestError(
+        "Invalid schema",
+        response=MagicMock(status_code=400),
+        body=None,
+    )
+
+    provider = OpenAIProvider(api_key="sk-mock")
+    monkeypatch.setattr(provider, "_get_client", lambda: mock_client)
+
+    with pytest.raises(LLMResponseValidationError) as exc_info:
+        provider.analyze("Transcript text")
+    assert "invalid request" in str(exc_info.value).lower()
+
+
+def test_openai_provider_refusal_raises(monkeypatch):
+    mock_choice = MagicMock()
+    mock_choice.message.refusal = "Safety policy refusal"
+    mock_choice.message.parsed = None
+
+    mock_completion = MagicMock()
+    mock_completion.choices = [mock_choice]
+
+    mock_client = MagicMock()
+    mock_client.beta.chat.completions.parse.return_value = mock_completion
+
+    provider = OpenAIProvider(api_key="sk-mock")
+    monkeypatch.setattr(provider, "_get_client", lambda: mock_client)
+
+    with pytest.raises(LLMResponseValidationError) as exc_info:
+        provider.analyze("Transcript text")
+    assert "refused" in str(exc_info.value).lower()
 
 
 def test_openai_provider_empty_parsed_response_raises(monkeypatch):
@@ -382,7 +545,7 @@ def test_openai_provider_empty_parsed_response_raises(monkeypatch):
 
 
 # ==========================================
-# 4. Architectural Isolation Test
+# 5. Architectural Isolation Test
 # ==========================================
 
 def test_ai_analysis_stage_does_not_import_openai():

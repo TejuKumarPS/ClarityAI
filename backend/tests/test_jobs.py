@@ -751,5 +751,52 @@ async def test_job_create_worker_process_and_retrieve_e2e(client, db, monkeypatc
     assert comp_data["error_code"] is None
 
 
+@pytest.mark.anyio
+async def test_job_failed_worker_retrieval_and_safe_error_exposure(client, db, monkeypatch):
+    from app.processing import create_default_pipeline
+    from app.llm.openai_provider import OpenAIProvider
+    from app.worker.tasks import process_job
+    import app.worker.tasks as tasks_module
+
+    # Unconfigured OpenAI provider (no API key)
+    unconfigured_pipeline = create_default_pipeline(llm_provider=OpenAIProvider(api_key=""))
+    monkeypatch.setattr(tasks_module, "_pipeline_override", unconfigured_pipeline)
+
+    token = await register_and_get_token(client, email="failed_job_user@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    transcript = "Confidential sprint transcript containing secrets."
+    res_create = await client.post(
+        f"{settings.API_V1_STR}/jobs",
+        json={"input_type": "text_paste", "content": transcript},
+        headers=headers,
+    )
+    assert res_create.status_code == 201
+    job_id = res_create.json()["id"]
+
+    # Worker processing encounters non-retryable LLMConfigurationError
+    try:
+        process_job.apply(args=[job_id], throw=True)
+    except Exception:
+        pass
+
+    # Retrieve failed job
+    res_failed = await client.get(f"{settings.API_V1_STR}/jobs/{job_id}", headers=headers)
+    assert res_failed.status_code == 200
+    data = res_failed.json()
+    assert data["status"] == "failed"
+    assert data["error_code"] == "LLM_CONFIGURATION_ERROR"
+    assert data["result"] == {
+        "error": {
+            "code": "LLM_CONFIGURATION_ERROR",
+            "message": "LLM service is improperly configured",
+        }
+    }
+    # Raw transcript is NOT leaked in API response
+    assert "raw_transcript" not in data
+    assert transcript not in str(data)
+
+
+
 
 
