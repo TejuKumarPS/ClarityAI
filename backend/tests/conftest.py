@@ -64,3 +64,32 @@ async def client(db):
     app.dependency_overrides.clear()
 
 
+@pytest.fixture(autouse=True)
+def reset_rate_limiter():
+    from app.core.rate_limit import limiter
+    limiter.reset()
+    yield
+    limiter.reset()
+
+
+@pytest.fixture(autouse=True)
+def mock_celery_delay_if_no_redis(monkeypatch, request):
+    # Skip mocking for tests that specifically test Redis or enqueue failures
+    skip_tests = {
+        "test_redis_connectivity",
+        "test_celery_broker_connection",
+        "test_job_creation_enqueue_failure_handling",
+    }
+    if request.node.name in skip_tests:
+        yield
+        return
+
+    import redis
+    from app.core.config import settings
+    try:
+        r = redis.from_url(settings.REDIS_URL, socket_timeout=0.5)
+        r.ping()
+    except Exception:
+        from app.worker import tasks as worker_tasks
+        monkeypatch.setattr(worker_tasks.process_job, "delay", lambda *args, **kwargs: None)
+    yield

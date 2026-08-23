@@ -3,11 +3,14 @@ import math
 import uuid
 from typing import Optional, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import Response
 
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.config import settings
 from app.core.database import get_db
+from app.core.rate_limit import limiter
 from app.input_handlers.factory import InputHandlerFactory
 from app.input_handlers.exceptions import (
     TranscriptInputError,
@@ -22,11 +25,10 @@ from app.models.user import User
 from app.models.job import Job
 from app.schemas.job import JobResponse, JobListResponse
 from app.worker.tasks import process_job
+from app.reporting.pdf_generator import generate_job_report_pdf
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
 
 
 @router.post(
@@ -35,6 +37,7 @@ router = APIRouter()
     status_code=status.HTTP_201_CREATED,
     summary="Create a new transcript processing job",
 )
+@limiter.limit(lambda: f"{settings.RATE_LIMIT_JOBS_PER_HOUR}/hour")
 async def create_job(
     request: Request,
     current_user: User = Depends(get_current_user),
@@ -247,4 +250,76 @@ async def get_job(
     return job
 
 
+@router.delete(
+    "/{job_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a job owned by the authenticated user",
+)
+async def delete_job(
+    job_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    job = (
+        db.query(Job)
+        .filter(
+            Job.id == job_id,
+            Job.user_id == current_user.id,
+        )
+        .first()
+    )
 
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found",
+        )
+
+    db.delete(job)
+    db.commit()
+
+    logger.info("job_deleted: job_id=%s user_id=%s", job_id, current_user.id)
+
+
+@router.get(
+    "/{job_id}/download",
+    status_code=status.HTTP_200_OK,
+    summary="Download a PDF report for a completed job",
+)
+async def download_job_report(
+    job_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    job = (
+        db.query(Job)
+        .filter(
+            Job.id == job_id,
+            Job.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found",
+        )
+
+    if job.status != "complete":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Job is not yet complete",
+        )
+
+    logger.info("pdf_download_requested: job_id=%s user_id=%s", job_id, current_user.id)
+
+    pdf_bytes = generate_job_report_pdf(job)
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="clarityai-report-{job_id}.pdf"',
+        },
+    )

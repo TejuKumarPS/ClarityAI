@@ -1163,6 +1163,248 @@ async def test_list_jobs_result_serialization_integrity(client, db):
 
 
 
+# ==========================================
+# DELETE /jobs/{job_id} Tests
+# ==========================================
+
+@pytest.mark.anyio
+async def test_delete_job_success(client, db):
+    token = await register_and_get_token(client, email="delete_success@example.com")
+    user = db.query(User).filter(User.email == "delete_success@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Create a job
+    res_create = await client.post(
+        f"{settings.API_V1_STR}/jobs",
+        json={"input_type": "text_paste", "content": "Transcript for delete test."},
+        headers=headers,
+    )
+    assert res_create.status_code == 201
+    job_id = res_create.json()["id"]
+
+    # Delete the job
+    res_delete = await client.delete(f"{settings.API_V1_STR}/jobs/{job_id}", headers=headers)
+    assert res_delete.status_code == 204
+    assert res_delete.content == b""
+
+    # Verify subsequent GET returns 404
+    res_get = await client.get(f"{settings.API_V1_STR}/jobs/{job_id}", headers=headers)
+    assert res_get.status_code == 404
+    assert res_get.json()["detail"] == "Job not found"
 
 
+@pytest.mark.anyio
+async def test_delete_job_nonexistent(client):
+    token = await register_and_get_token(client, email="delete_nonexistent@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
 
+    fake_id = str(uuid.uuid4())
+    response = await client.delete(f"{settings.API_V1_STR}/jobs/{fake_id}", headers=headers)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Job not found"
+
+
+@pytest.mark.anyio
+async def test_delete_job_ownership_isolation(client, db):
+    token_a = await register_and_get_token(client, email="delete_owner_a@example.com")
+    token_b = await register_and_get_token(client, email="delete_owner_b@example.com")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    # User A creates a job
+    res_create = await client.post(
+        f"{settings.API_V1_STR}/jobs",
+        json={"input_type": "text_paste", "content": "User A private transcript for delete isolation."},
+        headers=headers_a,
+    )
+    assert res_create.status_code == 201
+    job_id = res_create.json()["id"]
+
+    # User B tries to delete User A's job -> 404
+    res_delete = await client.delete(f"{settings.API_V1_STR}/jobs/{job_id}", headers=headers_b)
+    assert res_delete.status_code == 404
+    assert res_delete.json()["detail"] == "Job not found"
+
+    # User A can still get the job
+    res_get = await client.get(f"{settings.API_V1_STR}/jobs/{job_id}", headers=headers_a)
+    assert res_get.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_delete_job_unauthenticated(client, db):
+    user = User(email="delete_unauth@example.com", password_hash="hash")
+    db.add(user)
+    db.commit()
+    job = Job(user_id=user.id, input_type="text_paste", raw_transcript="Sample transcript text.", status="pending")
+    db.add(job)
+    db.commit()
+
+    response = await client.delete(f"{settings.API_V1_STR}/jobs/{job.id}")
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_delete_job_invalid_uuid_format(client):
+    token = await register_and_get_token(client, email="delete_invalid_uuid@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = await client.delete(f"{settings.API_V1_STR}/jobs/not-a-valid-uuid", headers=headers)
+    assert response.status_code == 422
+
+
+# ==========================================
+# GET /jobs/{job_id}/download (PDF Export) Tests
+# ==========================================
+
+def _make_complete_result():
+    """Helper to build a realistic complete job result with ai_analysis."""
+    return {
+        "processor": "clarityai-pipeline",
+        "version": "0.6.0",
+        "job_id": "test-download-id",
+        "metadata": {"character_count": 200, "word_count": 40, "line_count": 5},
+        "chunking_metadata": {"chunk_count": 1, "chunk_size_chars": 4000, "chunk_overlap_chars": 400},
+        "retrieval_metadata": {"retrieval_strategy": "keyword", "retrieved_count": 1, "query": "meeting"},
+        "ai_analysis": {
+            "summary": "The team discussed Q3 roadmap priorities.",
+            "key_points": ["Aligned on Q3 goals", "Budget approved"],
+            "decisions": [{"decision": "Adopt Kubernetes", "rationale": "Scale horizontally"}],
+            "action_items": [{"task": "Set up staging cluster", "owner": "Platform Team"}],
+            "risks": [{"description": "Migration downtime", "severity": "medium"}],
+            "open_questions": [{"question": "Timeline for rollout?", "owner": "PM"}],
+            "sentiment": "positive",
+        },
+        "llm_usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
+        "llm_provider": "fake",
+        "llm_model": "fake-model",
+    }
+
+
+@pytest.mark.anyio
+async def test_download_job_completed(client, db):
+    token = await register_and_get_token(client, email="download_ok@example.com")
+    user = db.query(User).filter(User.email == "download_ok@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    job = Job(
+        user_id=user.id,
+        input_type="text_paste",
+        raw_transcript="Meeting transcript.",
+        status="complete",
+        result=_make_complete_result(),
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs/{job.id}/download", headers=headers)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert f"clarityai-report-{job.id}.pdf" in response.headers["content-disposition"]
+    assert len(response.content) > 0
+    assert response.content[:5] == b"%PDF-"
+
+
+@pytest.mark.anyio
+async def test_download_job_pending(client, db):
+    token = await register_and_get_token(client, email="download_pending@example.com")
+    user = db.query(User).filter(User.email == "download_pending@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    job = Job(user_id=user.id, input_type="text_paste", raw_transcript="Transcript.", status="pending")
+    db.add(job)
+    db.commit()
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs/{job.id}/download", headers=headers)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Job is not yet complete"
+
+
+@pytest.mark.anyio
+async def test_download_job_processing(client, db):
+    token = await register_and_get_token(client, email="download_processing@example.com")
+    user = db.query(User).filter(User.email == "download_processing@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    job = Job(user_id=user.id, input_type="text_paste", raw_transcript="Transcript.", status="processing")
+    db.add(job)
+    db.commit()
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs/{job.id}/download", headers=headers)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Job is not yet complete"
+
+
+@pytest.mark.anyio
+async def test_download_job_failed(client, db):
+    token = await register_and_get_token(client, email="download_failed@example.com")
+    user = db.query(User).filter(User.email == "download_failed@example.com").first()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    job = Job(
+        user_id=user.id,
+        input_type="text_paste",
+        raw_transcript="Transcript.",
+        status="failed",
+        error_code="PROCESSING_ERROR",
+        result={"error": {"code": "PROCESSING_ERROR", "message": "Processing failed"}},
+    )
+    db.add(job)
+    db.commit()
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs/{job.id}/download", headers=headers)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Job is not yet complete"
+
+
+@pytest.mark.anyio
+async def test_download_job_nonexistent(client):
+    token = await register_and_get_token(client, email="download_nonexistent@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    fake_id = str(uuid.uuid4())
+    response = await client.get(f"{settings.API_V1_STR}/jobs/{fake_id}/download", headers=headers)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Job not found"
+
+
+@pytest.mark.anyio
+async def test_download_job_ownership_isolation(client, db):
+    token_a = await register_and_get_token(client, email="download_owner_a@example.com")
+    token_b = await register_and_get_token(client, email="download_owner_b@example.com")
+    user_a = db.query(User).filter(User.email == "download_owner_a@example.com").first()
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    job = Job(
+        user_id=user_a.id,
+        input_type="text_paste",
+        raw_transcript="Private transcript.",
+        status="complete",
+        result=_make_complete_result(),
+    )
+    db.add(job)
+    db.commit()
+
+    # User B tries to download User A's job -> 404
+    response = await client.get(f"{settings.API_V1_STR}/jobs/{job.id}/download", headers=headers_b)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Job not found"
+
+
+@pytest.mark.anyio
+async def test_download_job_unauthenticated(client, db):
+    user = User(email="download_unauth@example.com", password_hash="hash")
+    db.add(user)
+    db.commit()
+    job = Job(
+        user_id=user.id,
+        input_type="text_paste",
+        raw_transcript="Transcript.",
+        status="complete",
+        result=_make_complete_result(),
+    )
+    db.add(job)
+    db.commit()
+
+    response = await client.get(f"{settings.API_V1_STR}/jobs/{job.id}/download")
+    assert response.status_code == 401

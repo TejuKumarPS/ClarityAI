@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     DEFAULT_MAX_RETRIEVAL_RESULTS: int = 5
     MAX_RETRIEVAL_QUERY_CHARS: int = 100
 
-
+    RATE_LIMIT_JOBS_PER_HOUR: int = 20
 
 
 
@@ -88,6 +88,8 @@ class Settings(BaseSettings):
             raise ValueError("DEFAULT_MAX_RETRIEVAL_RESULTS must be greater than 0")
         if self.MAX_RETRIEVAL_QUERY_CHARS <= 0:
             raise ValueError("MAX_RETRIEVAL_QUERY_CHARS must be greater than 0")
+        if self.RATE_LIMIT_JOBS_PER_HOUR <= 0:
+            raise ValueError("RATE_LIMIT_JOBS_PER_HOUR must be greater than 0")
 
         return self
 
