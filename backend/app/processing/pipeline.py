@@ -1,5 +1,5 @@
+from app.core.config import settings
 from app.llm.base import LLMProvider
-from app.llm.openai_provider import OpenAIProvider
 from app.chunking.base import DocumentChunker
 from app.chunking.chunker import CharacterChunker
 from app.retrieval.base import Retriever
@@ -63,7 +63,18 @@ def create_default_pipeline(
     chunker: DocumentChunker | None = None,
     retriever: Retriever | None = None,
 ) -> ProcessingPipeline:
-    provider = llm_provider if llm_provider is not None else OpenAIProvider()
+    if llm_provider is not None:
+        provider = llm_provider
+    elif (
+        (getattr(settings, "LLM_PROVIDER", "").lower() == "groq")
+        or (getattr(settings, "GROQ_API_KEY", None) and not getattr(settings, "OPENAI_API_KEY", None))
+    ):
+        from app.llm.groq_provider import GroqProvider
+        provider = GroqProvider()
+    else:
+        from app.llm.openai_provider import OpenAIProvider
+        provider = OpenAIProvider()
+
     doc_chunker = chunker if chunker is not None else CharacterChunker()
     doc_retriever = retriever if retriever is not None else KeywordRetriever()
     return ProcessingPipeline(

@@ -19,6 +19,8 @@ htmlcov/
 .env.local
 .env.*.local
 backend/.env
+*.pem
+aws/
 
 # Node / Frontend
 frontend/node_modules/

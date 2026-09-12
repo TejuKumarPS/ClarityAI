@@ -40,8 +40,9 @@ class ApiClient {
 
   async request(endpoint, options = {}) {
     const url = endpoint.startsWith('http') ? endpoint : `${API_BASE_URL}${endpoint}`
+    const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData
     const headers = {
-      'Content-Type': 'application/json',
+      ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
       ...(options.headers || {}),
     }
 
@@ -131,6 +132,19 @@ class ApiClient {
     })
   }
 
+  async createFileJob(file) {
+    const ext = file.name.split('.').pop().toLowerCase()
+    const inputType = ext === 'pdf' ? 'pdf_file' : 'txt_file'
+    const formData = new FormData()
+    formData.append('input_type', inputType)
+    formData.append('file', file)
+
+    return this.request('/jobs', {
+      method: 'POST',
+      body: formData,
+    })
+  }
+
   async listJobs(page = 1, pageSize = 20) {
     return this.request(`/jobs?page=${page}&page_size=${pageSize}`, {
       method: 'GET',
@@ -141,6 +155,16 @@ class ApiClient {
     return this.request(`/jobs/${jobId}`, {
       method: 'GET',
     })
+  }
+
+  async deleteJob(jobId) {
+    return this.request(`/jobs/${jobId}`, {
+      method: 'DELETE',
+    })
+  }
+
+  getDownloadUrl(jobId) {
+    return `${API_BASE_URL}/jobs/${jobId}/download`
   }
 }
 

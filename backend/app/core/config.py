@@ -23,8 +23,12 @@ class Settings(BaseSettings):
     CELERY_TASK_MAX_RETRIES: int = 3
     CELERY_TASK_RETRY_BACKOFF: int = 1
 
+    LLM_PROVIDER: str = "openai"
     OPENAI_API_KEY: str | None = None
     OPENAI_MODEL: str = "gpt-4o-mini"
+    GROQ_API_KEY: str | None = None
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
     MAX_LLM_INPUT_CHARACTERS: int = 100_000
 
     LLM_ENABLED: bool = True

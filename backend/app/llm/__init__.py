@@ -18,6 +18,7 @@ from app.llm.exceptions import (
 from app.llm.base import LLMProvider
 from app.llm.fake_provider import FakeLLMProvider
 from app.llm.openai_provider import OpenAIProvider
+from app.llm.groq_provider import GroqProvider
 
 __all__ = [
     "Decision",
@@ -36,4 +37,5 @@ __all__ = [
     "LLMProvider",
     "FakeLLMProvider",
     "OpenAIProvider",
+    "GroqProvider",
 ]

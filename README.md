@@ -19,7 +19,6 @@
 6. [Local Development Setup](#-local-development-setup)
 7. [Docker Development Environment](#-docker-development-environment)
 8. [Automated Testing & Verification](#-automated-testing--verification)
-9. [Milestone Progress & Roadmap](#-milestone-progress--roadmap)
 
 ---
 
